@@ -1,0 +1,100 @@
+cmake_minimum_required(VERSION 3.20)
+project(rmmz_native C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# ---------------------------------------------------------------------
+# Dependencies
+# ---------------------------------------------------------------------
+set(THIRD_PARTY_DIR ${CMAKE_SOURCE_DIR}/third_party)
+
+# quickjs-ng
+add_subdirectory(${THIRD_PARTY_DIR}/quickjs-ng EXCLUDE_FROM_ALL)
+
+# SDL3
+set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+set(SDL_STATIC ON CACHE BOOL "" FORCE)
+add_subdirectory(${THIRD_PARTY_DIR}/SDL EXCLUDE_FROM_ALL)
+
+# glad
+add_library(glad STATIC
+    ${THIRD_PARTY_DIR}/glad/src/glad.c
+)
+target_include_directories(glad PUBLIC ${THIRD_PARTY_DIR}/glad/include)
+
+# stb / miniaudio headers
+include_directories(
+    ${THIRD_PARTY_DIR}/stb
+    ${THIRD_PARTY_DIR}/miniaudio
+)
+
+# ---------------------------------------------------------------------
+# Main executable
+# ---------------------------------------------------------------------
+add_executable(rmmz_native
+    src/main.c
+    src/native_gl.c
+)
+
+set(QJS_TARGET quickjs)
+if(NOT TARGET quickjs AND TARGET qjs)
+    set(QJS_TARGET qjs)
+endif()
+if(NOT TARGET ${QJS_TARGET})
+    message(FATAL_ERROR "Cannot find the quickjs-ng library target (expected `quickjs` or `qjs`).")
+endif()
+
+target_link_libraries(rmmz_native PRIVATE
+    ${QJS_TARGET}
+    SDL3::SDL3
+    glad
+)
+
+# System OpenGL
+if(APPLE)
+    target_link_libraries(rmmz_native PRIVATE "-framework OpenGL")
+elseif(WIN32)
+    target_link_libraries(rmmz_native PRIVATE opengl32)
+else()
+    target_link_libraries(rmmz_native PRIVATE GL)
+endif()
+
+# ---------------------------------------------------------------------
+# MinGW: static-link libgcc and winpthread so no DLLs are needed at runtime
+# ---------------------------------------------------------------------
+if(MINGW)
+    target_link_options(rmmz_native PRIVATE
+        -static-libgcc
+        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
+    )
+endif()
+
+# ---------------------------------------------------------------------
+# Post-build: copy shims.js and Project1 next to the executable
+# ---------------------------------------------------------------------
+# copy_if_different so we never touch the timestamp if unchanged.
+add_custom_command(TARGET rmmz_native POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/shims.js
+        $<TARGET_FILE_DIR:rmmz_native>/shims.js
+)
+
+# shims.js is edited frequently (JS-only, so main.c never relinks). The
+# POST_BUILD copy above only runs when rmmz_native itself relinks, which
+# would silently ship a stale shims.js on every JS-only change. This ALL
+# target forces the copy on EVERY build regardless.
+add_custom_target(copy_shims ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/shims.js
+        $<TARGET_FILE_DIR:rmmz_native>/shims.js
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/shims.js
+)
+
+if(EXISTS ${CMAKE_SOURCE_DIR}/src/Project1)
+    add_custom_command(TARGET rmmz_native POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/src/Project1
+            $<TARGET_FILE_DIR:rmmz_native>/Project1
+    )
+endif()

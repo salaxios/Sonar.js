@@ -1,0 +1,32 @@
+# Build output
+/build/
+*.obj
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.d
+
+# CMake
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/Makefile
+/CMakeLists.txt.user
+*.cmake.generated
+
+# Runtime / stray files at repo root (leftover backups / work notes)
+/native_gl.c
+/zz_root.obj
+/libwinpthread-1.dll
+/instructions.txt
+
+# In-game saves
+/savedata/
+**/savedata/
+
+# OS junk
+Thumbs.db
+Desktop.ini
+.DS_Store
