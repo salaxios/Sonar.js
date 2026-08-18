@@ -11,7 +11,7 @@ Ultimate goal/direction to work toward is to create something like or similar to
 
 - Faces do not yet work, (entire face sheet shows up in a textbox for any actor or message whose designated face is on that sheet)
 
--Community plugin support is highly variable, many if not most do not work yet. (FOSSIL should theoretically work, VisuStella does not work yet)
+-Community plugin support is highly variable, many do not work yet. Some will load, others will break the game, many will not work as intended.(FOSSIL should theoretically work, VisuStella does not work yet, UltraMode7 Works).
 
 -Saving/Loading do not work yet
 
