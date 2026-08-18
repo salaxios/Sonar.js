@@ -1,5 +1,7 @@
 # Sonar.js
-Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io)
+Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io).
+
+Ultimate goal/direction to work toward is to create something like or similar to EasyRPG but for RPGMaker MZ.
 
 -Vanilla RPGMaker MZ Games will run currently with, graphical bugs surrounding text rendering.
 
