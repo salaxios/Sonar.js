@@ -7,6 +7,10 @@ Ultimate goal/direction to work toward is to create something like or similar to
 
 -Fonts do not work, it just loads a default font.
 
+- Icons in text do not yet work (the entire icon sheet shows up in a small frame, not the specific icon)
+
+- Faces do not yet work, (entire face sheet shows up in a textbox for any actor or message whose designated face is on that sheet)
+
 -Community plugin support is highly variable, many if not most do not work yet. (FOSSIL should theoretically work, VisuStella does not work yet)
 
 -Saving/Loading do not work yet
