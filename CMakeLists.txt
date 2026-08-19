@@ -12,6 +12,16 @@ set(THIRD_PARTY_DIR ${CMAKE_SOURCE_DIR}/third_party)
 # quickjs-ng
 add_subdirectory(${THIRD_PARTY_DIR}/quickjs-ng EXCLUDE_FROM_ALL)
 
+# MSVC < 19.28 has no <stdatomic.h>. quickjs supports disabling atomics
+# entirely via __STDC_NO_ATOMICS__; the runtime never uses Atomics.
+if(MSVC)
+    if(TARGET qjs)
+        target_compile_options(qjs PRIVATE "-D__STDC_NO_ATOMICS__")
+    elseif(TARGET quickjs)
+        target_compile_options(quickjs PRIVATE "-D__STDC_NO_ATOMICS__")
+    endif()
+endif()
+
 # SDL3
 set(SDL_SHARED OFF CACHE BOOL "" FORCE)
 set(SDL_STATIC ON CACHE BOOL "" FORCE)
@@ -36,6 +46,16 @@ add_executable(rmmz_native
     src/main.c
     src/native_gl.c
 )
+
+# ---------------------------------------------------------------------
+# Windows application icon (embedded via .rc resource)
+# ---------------------------------------------------------------------
+if(WIN32)
+    file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/src/icon.ico" ICON_PATH)
+    configure_file(${CMAKE_SOURCE_DIR}/src/rmmz_native.rc.in
+                   ${CMAKE_BINARY_DIR}/rmmz_native.rc @ONLY)
+    target_sources(rmmz_native PRIVATE ${CMAKE_BINARY_DIR}/rmmz_native.rc)
+endif()
 
 set(QJS_TARGET quickjs)
 if(NOT TARGET quickjs AND TARGET qjs)
