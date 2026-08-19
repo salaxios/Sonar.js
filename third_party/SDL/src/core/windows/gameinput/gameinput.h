@@ -29,8 +29,10 @@
 #include <stdint.h>
 #include <unknwn.h>
 
+#ifndef APP_LOCAL_DEVICE_ID_SIZE
 #define APP_LOCAL_DEVICE_ID_SIZE 16
 typedef struct APP_LOCAL_DEVICE_ID { uint8_t value[APP_LOCAL_DEVICE_ID_SIZE]; } APP_LOCAL_DEVICE_ID;
+#endif
 
 #pragma region Application Family or OneCore Family or Games Family
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP | WINAPI_PARTITION_SYSTEM | WINAPI_PARTITION_GAMES)

@@ -42,8 +42,26 @@ static ma_engine g_audio_engine;
 static int g_audio_initialized = 0;
 
 static char *native_data_path(const char *key) {
+    // Confirmed bug: RMMZ's NW.js-mode save path includes a subfolder
+    // (e.g. key = "save/file1.rmmzsave"), which used to be dropped
+    // straight into this snprintf, producing "./savedata/save/....sav".
+    // fopen() never creates intermediate directories, so if
+    // "./savedata/save/" doesn't already exist on disk, fopen() silently
+    // returns NULL and js_native_storage_set's `if (f)` guard skips the
+    // write with no error anywhere — saves appeared to work but nothing
+    // ever reached disk. Flattening any '/' or '\' out of the key means
+    // the path always lands directly inside "./savedata/" and never
+    // depends on a subdirectory existing.
+    static char sanitized[900];
+    size_t i = 0;
+    for (; key[i] && i < sizeof(sanitized) - 1; i++) {
+        char c = key[i];
+        sanitized[i] = (c == '/' || c == '\\') ? '_' : c;
+    }
+    sanitized[i] = '\0';
+
     static char path[1024];
-    snprintf(path, sizeof(path), "./savedata/%s.sav", key);
+    snprintf(path, sizeof(path), "./savedata/%s.sav", sanitized);
     return path;
 }
 
@@ -518,6 +536,19 @@ static void dispatch_wheel_event(JSContext *ctx, float dx, float dy) {
     JS_FreeValue(ctx, global);
 }
 
+// Confirmed bug: Utils.isNwjs() correctly returns true (shims.js fakes
+// require/process), so RMMZ's title/end-game "Exit to Desktop" command is
+// shown and wired to nw.App.quit() — but that was a pure no-op in
+// shims.js, so clicking it did nothing. This gives it something real to
+// call: setting g_engine.running = 0 stops the main loop exactly like a
+// native SDL_EVENT_QUIT does, so the app shuts down cleanly on the next
+// iteration instead of hanging around.
+static JSValue js_native_quit(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    g_engine.running = 0;
+    return JS_UNDEFINED;
+}
+
 static JSValue js_native_set_window_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 2) return JS_UNDEFINED;
@@ -564,6 +595,8 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_now, "now", 0));
     JS_SetPropertyStr(ctx, native, "setWindowSize",
                        JS_NewCFunction(ctx, js_native_set_window_size, "setWindowSize", 2));
+    JS_SetPropertyStr(ctx, native, "quit",
+                       JS_NewCFunction(ctx, js_native_quit, "quit", 0));
 
     JSValue gl = JS_NewObject(ctx);
     register_gl_bridge(ctx, gl);

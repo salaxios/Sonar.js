@@ -1529,7 +1529,12 @@ CanvasElementShim.prototype.getContext = function (type) {
     isDevToolsOpen: function () { return false; },
     showDevTools: function () {},
     closeDevTools: function () {},
-    close: function () {},
+    // Confirmed bug: this was a pure no-op, so RMMZ's "Exit to Desktop"
+    // command (shown because Utils.isNwjs() is true) did nothing when
+    // clicked. native.quit() stops the C main loop for a real, clean exit.
+    close: function () {
+      if (typeof native !== "undefined" && native.quit) native.quit();
+    },
     on: function (evt, fn) {},
     removeListener: function () {},
     removeAllListeners: function () {},
@@ -1582,7 +1587,13 @@ CanvasElementShim.prototype.getContext = function (type) {
     argv: [],
     dataPath: ".",
     manifest: { name: "RMMZ", main: "index.html" },
-    quit: function () {},
+    // Confirmed bug: this is the function RMMZ's "Exit to Desktop" command
+    // actually calls (nw.App.quit()), and it was a pure no-op — the
+    // window just sat there. native.quit() stops the C main loop, which
+    // reaches the same code path as closing the window normally.
+    quit: function () {
+      if (typeof native !== "undefined" && native.quit) native.quit();
+    },
     closeAllWindows: function () {},
     clearCache: function () {}
   };

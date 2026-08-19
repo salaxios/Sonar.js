@@ -1,0 +1,89 @@
+Sonar.js -- Compilation Instructions
+====================================
+
+Everything needed to build is committed in this repository. There are no
+submodules and nothing to download beyond a C compiler and CMake. All
+dependencies (QuickJS-ng, SDL3, glad, stb, miniaudio) live under third_party/.
+
+Prerequisites
+-------------
+  * CMake 3.20 or newer
+  * A C11 compiler: GCC (MinGW-w64), Clang, or MSVC
+
+Standard workflow (works everywhere)
+------------------------------------
+    cmake -S . -B build
+    cmake --build build
+
+On Windows with MSVC, add --config Release to the build step:
+    cmake --build build --config Release
+
+The exact invocations per platform are below.
+
+--------------------------------------------------------------------------
+Windows -- MinGW-w64 + Ninja (recommended)
+--------------------------------------------------------------------------
+1. Install CMake and a MinGW-w64 toolchain with Ninja.
+   With MSYS2 this is:
+       pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja
+   (or install "Git for Windows", "winget install Kitware.CMake", etc.)
+
+2. From the repository root:
+       cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+       cmake --build build
+
+3. Output: build\rmmz_native.exe
+   shims.js and the Project1 folder are copied next to the exe automatically.
+
+--------------------------------------------------------------------------
+Windows -- MSVC (Visual Studio / Build Tools)
+--------------------------------------------------------------------------
+1. Install Visual Studio 2019 or newer with the
+   "Desktop development with C++" workload.
+
+2. From the repository root:
+       cmake -S . -B build
+       cmake --build build --config Release
+
+3. Output: build\Release\rmmz_native.exe
+
+--------------------------------------------------------------------------
+Linux / macOS
+--------------------------------------------------------------------------
+1. Install cmake and gcc/clang (e.g. apt install cmake gcc, or brew
+   install cmake). SDL may need your distro's dev packages for X11/GL.
+
+2. From the repository root:
+       cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+       cmake --build build
+
+3. Output: build/rmmz_native
+
+--------------------------------------------------------------------------
+Running
+--------------------------------------------------------------------------
+Launch the built executable from the build directory (or any directory --
+it locates shims.js and Project1 relative to the executable, so keep them
+next to it). Vanilla RPG Maker MZ projects placed in Project1 will run.
+
+--------------------------------------------------------------------------
+Known issues / troubleshooting
+--------------------------------------------------------------------------
+* SDL 3.5.0 vs. new Windows SDK headers:
+  With very recent mingw-w64 / Windows SDKs, SDL's vendored header
+  third_party/SDL/src/core/windows/gameinput/gameinput.h redefines
+  APP_LOCAL_DEVICE_ID, which the newer windef.h already defines. The build
+  fails with:
+      error: conflicting declaration 'typedef ... APP_LOCAL_DEVICE_ID'
+  Fix (already applied in the current tree; keep it committed so fresh
+  clones build cleanly):
+      #ifndef APP_LOCAL_DEVICE_ID_SIZE
+      #define APP_LOCAL_DEVICE_ID_SIZE 16
+      typedef struct APP_LOCAL_DEVICE_ID { uint8_t value[APP_LOCAL_DEVICE_ID_SIZE]; } APP_LOCAL_DEVICE_ID;
+      #endif
+
+* If every link step on Windows "fails" with exit code 1 from cmd.exe even
+  though the .exe is produced, a broken Command Processor AutoRun registry
+  value (HKLM\Software\Microsoft\Command Processor\AutoRun) is the usual
+  culprit. A failing AutoRun command (e.g. "color 0f") makes every
+  cmd /c return 1. Remove or fix that registry value.
