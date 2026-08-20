@@ -1,4 +1,5 @@
-# Sonar.js
+# Sonar.js <img width="48" height="48" alt="image" src="https://github.com/user-attachments/assets/c5cfd653-437a-44fc-9cee-8deff0dae503" />
+
 Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io). Originally titled Salaxios WebGLEmu
 
 Ultimate goal/direction to work toward is to create something like or similar to EasyRPG but for RPGMaker MZ (or for PixiJS v5 in general, since EasyRPG is just an RPGMaker interpreter and not a complete software emulation layer).
