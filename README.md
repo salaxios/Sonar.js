@@ -55,5 +55,3 @@ cmake --build build
 
 or:
 cmake -S . -B build && cmake --build build --config Release
-
-It is recommended to experiment with basic RPGMaker MZ games downloaded from Itch.io, however all Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor, or at some point in the future we will make the effekseer animations inert but have the engine continue playing anyways.
