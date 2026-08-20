@@ -111,10 +111,14 @@ add_custom_target(copy_shims ALL
     DEPENDS ${CMAKE_SOURCE_DIR}/src/shims.js
 )
 
+# Bootstrap src/Project1 into the build tree ONLY if build/Project1 does not
+# already exist. build/Project1 may be the user's own non-public project, so
+# it must never be overwritten by a build (see cmake/copy_project1.cmake).
 if(EXISTS ${CMAKE_SOURCE_DIR}/src/Project1)
     add_custom_command(TARGET rmmz_native POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/src/Project1
-            $<TARGET_FILE_DIR:rmmz_native>/Project1
+        COMMAND ${CMAKE_COMMAND}
+            -DSRC_DIR=${CMAKE_SOURCE_DIR}/src/Project1
+            -DDST_DIR=$<TARGET_FILE_DIR:rmmz_native>/Project1
+            -P ${CMAKE_SOURCE_DIR}/cmake/copy_project1.cmake
     )
 endif()

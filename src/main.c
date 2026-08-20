@@ -264,6 +264,54 @@ static uint32_t utf8_next_codepoint(const char **p) {
     return cp;
 }
 
+// Width-only text measurement. Shares the same advance-width loop as
+// js_native_rasterize_text below, but skips stbtt_GetCodepointBitmap/the
+// per-glyph blit entirely. Added because Canvas2DContextShim.measureText
+// was calling the FULL rasterizeText path (glyph bitmap render + malloc +
+// JS_NewArrayBufferCopy) purely to read bmp.width off the result and throw
+// the pixels away — RMMZ's word-wrap and menu-layout code calls
+// measureText many times per frame, so that was effectively doing full
+// text rendering work for numbers nobody used.
+static JSValue js_native_measure_text(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    // argv: text, fontFamily, fontSizePx, bold
+    JSValue result = JS_NewObject(ctx);
+    if (argc < 3) { JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, 0)); return result; }
+    const char *text = JS_ToCString(ctx, argv[0]);
+    const char *family = JS_ToCString(ctx, argv[1]);
+    double size_px = 12;
+    JS_ToFloat64(ctx, &size_px, argv[2]);
+    int bold = (argc >= 4) ? JS_ToBool(ctx, argv[3]) : 0;
+    if (!bold && family && strstr(family, "bold")) bold = 1;
+
+    if (!text || !text[0] || size_px <= 0 || !load_font(bold)) {
+        if (text) JS_FreeCString(ctx, text);
+        if (family) JS_FreeCString(ctx, family);
+        JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, 0));
+        return result;
+    }
+
+    float scale = stbtt_ScaleForPixelHeight(&g_font, (float)size_px);
+    float pen = 0.0f;
+    const char *ptr = text;
+    while (*ptr) {
+        uint32_t cp = utf8_next_codepoint(&ptr);
+        int adv = 0, lsb = 0;
+        stbtt_GetCodepointHMetrics(&g_font, (int)cp, &adv, &lsb);
+        pen += adv * scale;
+    }
+    // +4 matches the padding js_native_rasterize_text bakes into its own
+    // returned bitmap width, so cursor/layout math stays consistent
+    // whichever of the two functions produced the width in use.
+    int w = (int)ceilf(pen) + 4; if (w < 1) w = 1;
+
+    JS_FreeCString(ctx, text);
+    JS_FreeCString(ctx, family);
+    JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, w));
+    return result;
+}
+
 static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     (void)this_val;
@@ -589,6 +637,8 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_decode_image, "decodeImage", 1));
     JS_SetPropertyStr(ctx, native, "rasterizeText",
                        JS_NewCFunction(ctx, js_native_rasterize_text, "rasterizeText", 8));
+    JS_SetPropertyStr(ctx, native, "measureText",
+                       JS_NewCFunction(ctx, js_native_measure_text, "measureText", 4));
     JS_SetPropertyStr(ctx, native, "audioInit",
                        JS_NewCFunction(ctx, js_native_audio_init, "audioInit", 0));
     JS_SetPropertyStr(ctx, native, "now",

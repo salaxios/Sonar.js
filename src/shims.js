@@ -543,17 +543,23 @@
     this._stack = [];
     this._path = [];
     this._pixview = null;
+    this._pixviewBuf = null;
   }
 
   Canvas2DContextShim.prototype._pix = function () {
-    // Always build a fresh view of the CURRENT _pixelData. The width/height
-    // setters call _allocPixels(), which REPLACES the ArrayBuffer with a new
-    // one of equal length (window bitmaps resize during open/close
-    // animations). Caching the view keyed on byte-length then silently keeps
-    // writing to the OLD buffer while the upload reads the NEW (blank) one,
-    // which made all window text invisible while still logging "bmp=yes".
+    // Cache the view by ArrayBuffer IDENTITY, not byte length — the prior
+    // bug here (see history) was caching by byte-length, which silently
+    // kept using a stale view when _allocPixels() replaced the buffer with
+    // a new one of the SAME length (e.g. a window resizing back to a size
+    // it was already at). Comparing the buffer reference itself catches
+    // every replacement, same-length or not, while still letting repeated
+    // _pix() calls within a frame skip re-wrapping the buffer.
     if (!this._canvas._pixelData) this._canvas._allocPixels();
-    return new Uint8ClampedArray(this._canvas._pixelData);
+    const buf = this._canvas._pixelData;
+    if (this._pixview && this._pixviewBuf === buf) return this._pixview;
+    this._pixview = new Uint8ClampedArray(buf);
+    this._pixviewBuf = buf;
+    return this._pixview;
   };
 
   Canvas2DContextShim.prototype._apply = function (x, y) {
@@ -729,9 +735,49 @@
     }
   };
 
+  // ----------------------------------------------------------------
+  // Text rendering caches. RMMZ redraws HUD numbers, menu labels, and
+  // window contents very frequently, often with unchanged text — and
+  // separately calls measureText many times per frame during word-wrap.
+  // Without caching, every one of those calls crossed into native code
+  // and re-ran stb_truetype (measureText was even doing a FULL glyph
+  // bitmap rasterization just to read the width off the result — see
+  // the native.measureText split below). Bounded so a message window's
+  // scrolling/typewriter text (which produces many one-off strings)
+  // can't grow these unboundedly; oldest entry is evicted on overflow,
+  // and a cache hit re-inserts to move it to the MRU end.
+  function makeBoundedCache(maxSize) {
+    const map = new Map();
+    return {
+      get: function (key) {
+        if (!map.has(key)) return undefined;
+        const v = map.get(key);
+        map.delete(key);
+        map.set(key, v);
+        return v;
+      },
+      set: function (key, value) {
+        if (map.has(key)) map.delete(key);
+        map.set(key, value);
+        if (map.size > maxSize) {
+          map.delete(map.keys().next().value);
+        }
+      }
+    };
+  }
+  // Rasterized glyph bitmaps (bigger entries, smaller cap).
+  const _textRasterCache = makeBoundedCache(600);
+  // Measured widths (tiny entries, can hold a lot more).
+  const _textMeasureCache = makeBoundedCache(4000);
+
   Canvas2DContextShim.prototype.fillText = function (text, x, y) {
     const f = parseFont(this.font), c = parseColor(this.fillStyle);
-    const bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+    const key = String(text) + "\u0001" + f.family + "\u0001" + f.size + "\u0001" + f.bold + "\u0001" + c.r + "," + c.g + "," + c.b + "," + c.a;
+    let bmp = _textRasterCache.get(key);
+    if (bmp === undefined) {
+      bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+      _textRasterCache.set(key, bmp);
+    }
     if (!bmp) return;
     let px = x, py = y;
     if (this.textAlign === "center") px = x - bmp.width / 2;
@@ -746,7 +792,12 @@
     const f = parseFont(this.font);
     const c = parseColor(this.strokeStyle);
     const lw = Math.max(1, Math.round(this.lineWidth || 1));
-    const bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+    const key = String(text) + "\u0001" + f.family + "\u0001" + f.size + "\u0001" + f.bold + "\u0001" + c.r + "," + c.g + "," + c.b + "," + c.a;
+    let bmp = _textRasterCache.get(key);
+    if (bmp === undefined) {
+      bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+      _textRasterCache.set(key, bmp);
+    }
     if (!bmp) return;
     let px = x, py = y;
     if (this.textAlign === "center") px = x - bmp.width / 2;
@@ -766,20 +817,74 @@
   };
   Canvas2DContextShim.prototype.measureText = function (text) {
     const f = parseFont(this.font);
-    const bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, 0, 0, 0, 255);
-    return { width: bmp ? bmp.width : 0 };
+    const key = String(text) + "\u0001" + f.family + "\u0001" + f.size + "\u0001" + f.bold;
+    let w = _textMeasureCache.get(key);
+    if (w === undefined) {
+      // Lightweight width-only native call — does NOT rasterize glyph
+      // bitmaps (see native.measureText in main.c). Previously this called
+      // native.rasterizeText, which fully rendered every glyph just to
+      // read bmp.width off the result and discard the pixels.
+      const m = native.measureText(String(text), f.family, f.size, f.bold);
+      w = m ? m.width : 0;
+      _textMeasureCache.set(key, w);
+    }
+    return { width: w };
   };
 
   Canvas2DContextShim.prototype.drawImage = function (img) {
     if (!img || !img._pixelData) return;
-    const sw = img.width || 0, sh = img.height || 0;
-    if (!sw || !sh) return;
-    const srcData = new Uint8ClampedArray(img._pixelData);
+    const iw = img.width || 0, ih = img.height || 0;
+    if (!iw || !ih) return;
+    const fullSrc = new Uint8ClampedArray(img._pixelData);
     const args = Array.prototype.slice.call(arguments, 1);
+
+    if (args.length >= 8) {
+      // 9-arg cropped form: drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)
+      // Crop the requested source rect out of the full image buffer into a
+      // tightly-packed buffer, then hand that off to the existing _blit
+      // (which only knows how to blit a whole buffer starting at 0,0).
+      // Without this, the crop was silently ignored and the entire source
+      // image (e.g. a full font atlas) got stamped into every glyph cell.
+      const sx = args[0] | 0, sy = args[1] | 0, sw = args[2] | 0, sh = args[3] | 0;
+      const dx = args[4], dy = args[5], dw = args[6], dh = args[7];
+      if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+
+      // Clamp the source rect to the actual image bounds (handles both a
+      // negative sx/sy and a crop that runs past the image's far edge —
+      // e.g. the last glyph cell packed against the right edge of an atlas).
+      const clippedSx = Math.max(0, sx);
+      const clippedSy = Math.max(0, sy);
+      const clippedEx = Math.min(iw, sx + sw);
+      const clippedEy = Math.min(ih, sy + sh);
+      const cw = clippedEx - clippedSx;
+      const ch = clippedEy - clippedSy;
+      if (cw <= 0 || ch <= 0) return;
+
+      const cropped = new Uint8ClampedArray(cw * ch * 4);
+      for (let row = 0; row < ch; row++) {
+        const srcOff = ((clippedSy + row) * iw + clippedSx) * 4;
+        const dstOff = row * cw * 4;
+        cropped.set(fullSrc.subarray(srcOff, srcOff + cw * 4), dstOff);
+      }
+
+      // If the crop got clipped against an image edge, shrink/offset the
+      // dest rect proportionally instead of stretching the smaller cropped
+      // chunk to fill the originally-requested dest size — that stretch is
+      // what produces smeared/doubled-looking glyphs at atlas edges.
+      const scaleX = dw / sw, scaleY = dh / sh;
+      const outDx = dx + (clippedSx - sx) * scaleX;
+      const outDy = dy + (clippedSy - sy) * scaleY;
+      const outDw = cw * scaleX;
+      const outDh = ch * scaleY;
+
+      this._blit(cropped, cw, ch, outDx, outDy, outDw, outDh);
+      return;
+    }
+
     let dx, dy, dw, dh;
     if (args.length >= 4) { dx = args[0]; dy = args[1]; dw = args[2]; dh = args[3]; }
-    else { dx = args[0]; dy = args[1]; dw = sw; dh = sh; }
-    this._blit(srcData, sw, sh, dx, dy, dw, dh);
+    else { dx = args[0]; dy = args[1]; dw = iw; dh = ih; }
+    this._blit(fullSrc, iw, ih, dx, dy, dw, dh);
   };
 
   Canvas2DContextShim.prototype.getImageData = function (x, y, w, h) {
@@ -1188,6 +1293,41 @@ CanvasElementShim.prototype.getContext = function (type) {
   // files under js/plugins/ were never executed. When a SCRIPT element with
   // a src is attached, read the file via native.readFile and eval it in the
   // global scope, firing onload/onerror like a browser would.
+  // Real <script> tags don't scope top-level var into a local eval frame
+  // based on their own "use strict" directive — only indirect eval() does
+  // that. Since plugins are executed via indirect eval() here (not a native
+  // per-script JS_Eval with global scope type), a leading "use strict"
+  // silently breaks any plugin that expects its top-level var declarations
+  // to land on the global object, which several plugin authors' namespace
+  // patterns rely on (e.g. "var Eli = Eli || {}" shared across a plugin
+  // family). Stripping the directive keeps eval's scoping behavior matching
+  // what a real browser <script> tag would actually do.
+  function stripLeadingUseStrict(src) {
+    // Scan linearly past BOM, whitespace, and leading // and /* */ comments
+    // (a quantifier-heavy regex like /^(...)*\s*(['"])use strict\2;?/ can
+    // catastrophically backtrack on large plugin sources and hang the eval).
+    let i = 0;
+    const n = src.length;
+    while (i < n) {
+      const c = src[i];
+      if (c === ' ' || c === '\t' || c === '\r' || c === '\n' ||
+          c === '\f' || c === '\v' || c === '\ufeff') { i++; continue; }
+      if (c === '/' && src[i + 1] === '/') {
+        i += 2;
+        while (i < n && src[i] !== '\n') i++;
+        continue;
+      }
+      if (c === '/' && src[i + 1] === '*') {
+        const end = src.indexOf('*/', i + 2);
+        i = end === -1 ? n : end + 2;
+        continue;
+      }
+      break;
+    }
+    const m = /^(['"])(use strict)\1;?/.exec(src.slice(i));
+    if (!m) return src;
+    return src.slice(0, i) + src.slice(i + m[0].length);
+  }
   function loadAndEvalScript(scriptElem) {
     if (!scriptElem || !scriptElem.src || scriptElem._executed) return;
     scriptElem._executed = true;
@@ -1204,15 +1344,30 @@ CanvasElementShim.prototype.getContext = function (type) {
     }
     const code = native.readFile(url);
     if (code) {
+      // document.currentScript must point at the script currently executing.
+      // Real browsers set this during script evaluation, and many plugins
+      // (EliMZ_Book, PluginCommonBase, etc.) derive their own plugin name
+      // from document.currentScript.src. A stale value here makes those
+      // plugins read the wrong name and get {} back from
+      // PluginManager.parameters(), which then crashes on JSON.parse(undefined).
+      const prevCurrentScript = document.currentScript;
+      document.currentScript = scriptElem;
+      let evalError = null;
       try {
         const evalFn = globalThis.eval || eval;
         // sourceURL gives real file names in QuickJS stack traces instead of <input>
-        evalFn(code + "\n//# sourceURL=" + url);
+        evalFn(stripLeadingUseStrict(code) + "\n//# sourceURL=" + url);
+      } catch (e) {
+        evalError = e;
+      } finally {
+        document.currentScript = prevCurrentScript;
+      }
+      if (evalError) {
+        print("[Plugin Error in " + url + "]: " + evalError + (evalError && evalError.stack ? "\n" + evalError.stack : ""));
+        if (scriptElem.onerror) scriptElem.onerror(evalError);
+      } else {
         print("[Plugin OK]: " + url);
         if (scriptElem.onload) scriptElem.onload();
-      } catch (e) {
-        print("[Plugin Error in " + url + "]: " + e + (e && e.stack ? "\n" + e.stack : ""));
-        if (scriptElem.onerror) scriptElem.onerror(e);
       }
     } else {
       print("[Plugin Not Found]: " + url);
@@ -2653,8 +2808,25 @@ CanvasElementShim.prototype.getContext = function (type) {
             sElem._executed = true;
             documentShim.body.appendChild(sElem);
 
-            const evalFn = globalThis.eval || eval;
-            evalFn(code + "\n//# sourceURL=" + url);
+            // Point document.currentScript at this plugin's <script> element
+            // while it evaluates, exactly like a browser would. Plugins that
+            // derive their name from document.currentScript.src (EliMZ_Book,
+            // PluginCommonBase, etc.) otherwise see a stale src and read the
+            // wrong plugin's parameters.
+            const prevCurrentScript = document.currentScript;
+            document.currentScript = sElem;
+            let pluginEvalError = null;
+try {
+              const evalFn = globalThis.eval || eval;
+              evalFn(stripLeadingUseStrict(code) + "\n//# sourceURL=" + url);
+            } catch (e) {
+              pluginEvalError = e;
+            } finally {
+              document.currentScript = prevCurrentScript;
+            }
+            if (pluginEvalError) {
+              throw pluginEvalError;
+            }
             PluginManager._scripts.push(plugin.name);
             print("  [Plugin LOADED]: " + plugin.name);
           } catch (e) {
