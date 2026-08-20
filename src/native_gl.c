@@ -8,6 +8,11 @@
 #include <glad/glad.h>
 #include "tracy/TracyC.h"
 
+// Defined in main.c; gates the per-call GL Tracy zones (bufferSubData,
+// bufferData, texImage*, draw*) that cost a timestamp + queue write on every
+// call. Off by default; enable with SONAR_TRACY=1 to profile GL traffic.
+extern int g_tracy_enabled;
+
 // ------------------------------------------------------------------
 // Bridge-side state for WebGL-only pixelStorei flags
 // ------------------------------------------------------------------
@@ -18,16 +23,6 @@ typedef struct {
 } GLBridgeState;
 
 static GLBridgeState g_gl_state = {GL_FALSE, GL_FALSE};
-
-// TEMP DIAGNOSTIC: plain integer draw counter (no GL queries, so it cannot
-// perturb state or hang the driver) used to confirm whether the renderer
-// actually issues draws every frame.
-static unsigned long g_draw_count = 0;
-unsigned long native_gl_get_draw_count(void) { return g_draw_count; }
-void native_gl_reset_draw_count(void) { g_draw_count = 0; }
-// TEMP DIAG: last ARRAY_BUFFER (vertex) upload snapshot.
-static uint8_t g_last_vb[1 << 20];
-static size_t g_last_vb_len = 0;
 
 // ------------------------------------------------------------------
 // Argument helpers
@@ -59,15 +54,10 @@ static GLboolean arg_bool(JSContext *ctx, JSValueConst v) {
 static uint8_t *arg_typed_array(JSContext *ctx, JSValueConst v, size_t *out_len) {
     if (JS_IsNull(v) || JS_IsUndefined(v)) { *out_len = 0; return NULL; }
 
-    // 1. Check if it's an ArrayBuffer directly
-    size_t ab_len = 0;
-    uint8_t *ab_data = JS_GetArrayBuffer(ctx, &ab_len, v);
-    if (ab_data) {
-        *out_len = ab_len;
-        return ab_data;
-    }
-
-    // 2. Check if it's a TypedArray (ArrayBufferView)
+    // Fast path: TypedArray / ArrayBufferView first. This is by far the
+    // common case for bufferSubData (Float32Array/Uint16Array views), and it
+    // avoids the wasted JS_GetArrayBuffer probe that the old order paid on
+    // every one of the ~693k bufferSubData calls.
     size_t offset = 0, len = 0, bpe = 0;
     JSValue buf = JS_GetTypedArrayBuffer(ctx, v, &offset, &len, &bpe);
     if (!JS_IsException(buf)) {
@@ -80,6 +70,14 @@ static uint8_t *arg_typed_array(JSContext *ctx, JSValueConst v, size_t *out_len)
         }
     } else {
         JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+
+    // 2. Check if it's an ArrayBuffer directly
+    size_t ab_len = 0;
+    uint8_t *ab_data = JS_GetArrayBuffer(ctx, &ab_len, v);
+    if (ab_data) {
+        *out_len = ab_len;
+        return ab_data;
     }
 
     // 3. Fallback for plain JS Array
@@ -233,7 +231,7 @@ static JSValue js_bindVertexArray(JSContext *ctx, JSValueConst t, int argc, JSVa
 
 static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.bufferData", 1);
+    TracyCZoneN(zone, "gl.bufferData", g_tracy_enabled);
     GLenum target = arg_uint(ctx, argv[0]);
     GLenum usage = arg_uint(ctx, argv[2]);
     if (JS_IsNumber(argv[1])) {
@@ -243,28 +241,18 @@ static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueCo
         size_t len = 0;
         uint8_t *data = arg_typed_array(ctx, argv[1], &len);
         glBufferData(target, (GLsizeiptr)len, data, usage);
-        // TEMP DIAG: remember the last ARRAY_BUFFER (vertex) upload.
-        if (target == GL_ARRAY_BUFFER) {
-            if (len <= sizeof(g_last_vb)) { memcpy(g_last_vb, data, len); g_last_vb_len = len; }
-            else g_last_vb_len = 0;
-        }
     }
     TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.bufferSubData", 1);
+    TracyCZoneN(zone, "gl.bufferSubData", g_tracy_enabled);
     GLenum target = arg_uint(ctx, argv[0]);
     GLintptr offset = (GLintptr)arg_int(ctx, argv[1]);
     size_t len = 0;
     uint8_t *data = arg_typed_array(ctx, argv[2], &len);
     glBufferSubData(target, offset, (GLsizeiptr)len, data);
-    // TEMP DIAG: track ARRAY_BUFFER (vertex) uploads.
-    if (target == GL_ARRAY_BUFFER && (size_t)offset + len <= sizeof(g_last_vb)) {
-        memcpy(g_last_vb + offset, data, len);
-        if ((size_t)offset + len > g_last_vb_len) g_last_vb_len = offset + len;
-    }
     TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
@@ -307,7 +295,7 @@ static uint8_t *get_image_source_pixels(JSContext *ctx, JSValueConst source,
 
 static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.texImage2D", 1);
+    TracyCZoneN(zone, "gl.texImage2D", g_tracy_enabled);
     GLenum target = arg_uint(ctx, argv[0]);
     GLint level = arg_int(ctx, argv[1]);
 
@@ -372,7 +360,7 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
 
 static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.texSubImage2D", 1);
+    TracyCZoneN(zone, "gl.texSubImage2D", g_tracy_enabled);
     GLenum target = arg_uint(ctx, argv[0]);
     GLint level = arg_int(ctx, argv[1]);
 
@@ -679,12 +667,12 @@ static JSValue js_vertexAttribDivisor(JSContext *ctx, JSValueConst t, int argc, 
     (void)t; glVertexAttribDivisor(arg_uint(ctx, argv[0]), arg_uint(ctx, argv[1])); return JS_UNDEFINED;
 }
 static JSValue js_drawArrays(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
-    (void)t; g_draw_count++; TracyCZoneN(zone, "gl.drawArrays", 1); glDrawArrays(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2])); TracyCZoneEnd(zone);
+    (void)t; TracyCZoneN(zone, "gl.drawArrays", g_tracy_enabled); glDrawArrays(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2])); TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawElements(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
-    (void)t; g_draw_count++;
-    TracyCZoneN(zone, "gl.drawElements", 1);
+    (void)t;
+    TracyCZoneN(zone, "gl.drawElements", g_tracy_enabled);
     glDrawElements(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                     (const void *)(intptr_t)arg_int(ctx, argv[3]));
     TracyCZoneEnd(zone);
@@ -692,14 +680,14 @@ static JSValue js_drawElements(JSContext *ctx, JSValueConst t, int argc, JSValue
 }
 static JSValue js_drawArraysInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.drawArraysInstanced", 1);
+    TracyCZoneN(zone, "gl.drawArraysInstanced", g_tracy_enabled);
     glDrawArraysInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2]), arg_int(ctx, argv[3]));
     TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawElementsInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    TracyCZoneN(zone, "gl.drawElementsInstanced", 1);
+    TracyCZoneN(zone, "gl.drawElementsInstanced", g_tracy_enabled);
     glDrawElementsInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                              (const void *)(intptr_t)arg_int(ctx, argv[3]), arg_int(ctx, argv[4]));
     TracyCZoneEnd(zone);
@@ -917,6 +905,81 @@ static JSValue js_getExtension(JSContext *ctx, JSValueConst t, int argc, JSValue
 }
 
 // ------------------------------------------------------------------
+// Batch buffer uploads — collapse many per-upload JS->C crossings into a
+// single native call. gl.bufferSubData alone was traced at ~693k calls;
+// batching them is the "reduce JS<->C boundary crossings" optimization.
+// ------------------------------------------------------------------
+
+// gl.batchBufferSubData([{target, offset, data, buffer}, ...]) — runs N
+// bufferSubData uploads in one native call instead of 3 JS->C hops per
+// upload. Each item carries the buffer ID that was bound at deferral time,
+// so the C loop re-binds it before uploading (correct even if the JS side
+// switched buffers between deferred calls).
+static JSValue js_batchBufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t;
+    if (argc < 1 || !JS_IsArray(argv[0])) return JS_UNDEFINED;
+    TracyCZoneN(zone, "gl.batchBufferSubData", g_tracy_enabled);
+    JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
+    int32_t n = 0;
+    JS_ToInt32(ctx, &n, len_val);
+    JS_FreeValue(ctx, len_val);
+    for (int32_t i = 0; i < n; i++) {
+        JSValue item = JS_GetPropertyUint32(ctx, argv[0], i);
+        if (!JS_IsObject(item)) { JS_FreeValue(ctx, item); continue; }
+
+        JSValue targetVal = JS_GetPropertyStr(ctx, item, "target");
+        JSValue offsetVal = JS_GetPropertyStr(ctx, item, "offset");
+        JSValue dataVal   = JS_GetPropertyStr(ctx, item, "data");
+        JSValue bufferVal = JS_GetPropertyStr(ctx, item, "buffer");
+
+        GLenum target = arg_uint(ctx, targetVal);
+        GLintptr offset = (GLintptr)arg_int(ctx, offsetVal);
+        GLuint buffer = arg_handle(ctx, bufferVal);
+        size_t len = 0;
+        uint8_t *data = arg_typed_array(ctx, dataVal, &len);
+
+        if (data && len > 0) {
+            glBindBuffer(target, buffer);
+            glBufferSubData(target, offset, (GLsizeiptr)len, data);
+        }
+
+        JS_FreeValue(ctx, targetVal);
+        JS_FreeValue(ctx, offsetVal);
+        JS_FreeValue(ctx, dataVal);
+        JS_FreeValue(ctx, bufferVal);
+        JS_FreeValue(ctx, item);
+    }
+    TracyCZoneEnd(zone);
+    return JS_UNDEFINED;
+}
+
+// gl.uploadBatchBuffer(vertexBuffer, vertexData, indexBuffer, indexData[, usage])
+// — uploads a render batch's vertex + index buffers in one native call.
+// Leaves GL_ARRAY_BUFFER bound to vertexBuffer and GL_ELEMENT_ARRAY_BUFFER
+// bound to indexBuffer, exactly like two glBufferData calls would.
+static JSValue js_uploadBatchBuffer(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t;
+    if (argc < 4) return JS_UNDEFINED;
+    TracyCZoneN(zone, "gl.uploadBatchBuffer", g_tracy_enabled);
+    GLuint vbo = arg_handle(ctx, argv[0]);
+    GLuint ibo = arg_handle(ctx, argv[2]);
+    GLenum usage = argc > 4 ? arg_uint(ctx, argv[4]) : GL_DYNAMIC_DRAW;
+
+    size_t vlen = 0;
+    uint8_t *vdata = arg_typed_array(ctx, argv[1], &vlen);
+    size_t ilen = 0;
+    uint8_t *idata = arg_typed_array(ctx, argv[3], &ilen);
+
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vlen, vdata, usage);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)ilen, idata, usage);
+
+    TracyCZoneEnd(zone);
+    return JS_UNDEFINED;
+}
+
+// ------------------------------------------------------------------
 // Registration
 // ------------------------------------------------------------------
 
@@ -1008,7 +1071,8 @@ void register_gl_bridge(JSContext *ctx, JSValueConst gl_obj) {
     REG(gl_obj, bindBuffer); REG(gl_obj, bindFramebuffer); REG(gl_obj, bindRenderbuffer);
     REG(gl_obj, bindTexture); REG(gl_obj, bindVertexArray); REG(gl_obj, blendEquationSeparate);
     REG(gl_obj, blendFunc); REG(gl_obj, blendFuncSeparate); REG(gl_obj, blitFramebuffer);
-    REG(gl_obj, bufferData); REG(gl_obj, bufferSubData); REG(gl_obj, clear); REG(gl_obj, clearColor);
+    REG(gl_obj, bufferData); REG(gl_obj, bufferSubData); REG(gl_obj, batchBufferSubData);
+    REG(gl_obj, uploadBatchBuffer); REG(gl_obj, clear); REG(gl_obj, clearColor);
     REG(gl_obj, clearStencil); REG(gl_obj, colorMask); REG(gl_obj, compileShader);
     REG(gl_obj, createBuffer); REG(gl_obj, createFramebuffer); REG(gl_obj, createProgram);
     REG(gl_obj, createRenderbuffer); REG(gl_obj, createShader); REG(gl_obj, createTexture);

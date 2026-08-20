@@ -149,6 +149,97 @@
   const native = globalThis.__native__;
   if (!native) throw new Error("shims.js: no __native__ bridge");
 
+  // Cache whether per-call Tracy profiling is on (SONAR_TRACY=1) so __tick__
+  // never pays a JS->C bridge hop every frame just to ask. Off by default:
+  // the per-call GL zones are the #1 measured overhead at high call counts.
+  const tracyOn = !!(native.tracyEnabled && native.tracyEnabled());
+
+  // ----------------------------------------------------------------
+  // ACCUMULATOR OPTIMIZATION (opt-in, SONAR_BATCH_UPLOADS=1): batch
+  // bufferSubData uploads and flush them once per draw in a single C-side
+  // loop, collapsing many JS->C boundary crossings into one call.
+  //
+  // Correctness notes vs. the naive version:
+  //  * PixiJS REUSES one Float32Array and rewrites it before each upload, so
+  //    a deferred reference to the source array would carry the NEXT batch's
+  //    bytes. We snapshot the bytes at defer time.
+  //  * After flushing, the buffer bindings current before the flush are
+  //    restored, so the upcoming draw sees the same bind state.
+  // ----------------------------------------------------------------
+  if (native.getEnv && native.getEnv("SONAR_BATCH_UPLOADS") === "1" &&
+      native.gl && native.gl.batchBufferSubData) {
+    const _origBindBuffer = native.gl.bindBuffer;
+    const _origBufferSubData = native.gl.bufferSubData;
+    const _origDrawElements = native.gl.drawElements;
+    const _origDrawArrays = native.gl.drawArrays;
+    const _origDrawElementsInstanced = native.gl.drawElementsInstanced;
+    const _origDrawArraysInstanced = native.gl.drawArraysInstanced;
+
+    const _pendingUploads = [];
+    let _needsFlush = false;
+    const _boundBuffers = {};
+
+    // Snapshot the payload so later reuse of the source typed array can't
+    // corrupt a deferred upload. Raw ArrayBuffers are already immutable.
+    function snapshotBytes(data) {
+      if (data && typeof data === "object" && data.buffer && data.byteLength !== undefined) {
+        const copy = new ArrayBuffer(data.byteLength);
+        new Uint8Array(copy).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        return copy;
+      }
+      return data;
+    }
+
+    native.gl.bindBuffer = function (target, buffer) {
+      _boundBuffers[target] = buffer;
+      return _origBindBuffer.call(this, target, buffer);
+    };
+
+    native.gl.bufferSubData = function (target, offset, data) {
+      _pendingUploads.push({
+        target: target,
+        offset: offset,
+        data: snapshotBytes(data),
+        buffer: _boundBuffers[target] || 0
+      });
+      _needsFlush = true;
+    };
+
+    function flushPendingUploads() {
+      if (!_needsFlush) return;
+      _needsFlush = false;
+      if (_pendingUploads.length === 0) return;
+      native.gl.batchBufferSubData(_pendingUploads);
+      _pendingUploads.length = 0; // reuse the array, avoid GC pressure
+      // Restore the bindings that were current before the flush so the
+      // upcoming draw (and any attribute setup) sees identical GL state.
+      for (const target in _boundBuffers) {
+        if (Object.prototype.hasOwnProperty.call(_boundBuffers, target)) {
+          _origBindBuffer.call(native.gl, target, _boundBuffers[target]);
+        }
+      }
+    }
+    native.gl.flushPendingUploads = flushPendingUploads;
+
+    native.gl.drawElements = function (mode, count, type, offset) {
+      flushPendingUploads();
+      return _origDrawElements.call(this, mode, count, type, offset);
+    };
+    native.gl.drawArrays = function (mode, first, count) {
+      flushPendingUploads();
+      return _origDrawArrays.call(this, mode, first, count);
+    };
+    native.gl.drawElementsInstanced = function (mode, count, type, offset, primcount) {
+      flushPendingUploads();
+      return _origDrawElementsInstanced.call(this, mode, count, type, offset, primcount);
+    };
+    native.gl.drawArraysInstanced = function (mode, first, count, primcount) {
+      flushPendingUploads();
+      return _origDrawArraysInstanced.call(this, mode, first, count, primcount);
+    };
+    print("[Shim] bufferSubData accumulator enabled (SONAR_BATCH_UPLOADS=1)");
+  }
+
   // ----------------------------------------------------------------
   // WebGL detection globals — confirmed required by tracing pixi.js:
   //   - line ~3999: isWebGLSupported() returns false immediately if
@@ -293,31 +384,54 @@
     rafCallbacks = rafCallbacks.filter(function (e) { return e.id !== id; });
   };
   globalThis.__tick__ = function (timestamp) {
+    // The RMMZ/Pixi ticker re-registers a single rAF per frame, so the hot
+    // path here is just: swap the rAF list, run it. Timers are rare
+    // (loader/async one-shots). Compact timers in place so the common frame
+    // allocates no arrays at all.
+    if (tracyOn) native.tracyZoneStart("JS tick internals");
+
     const now = performance.now();
-    const due = [];
-    const remaining = [];
-    for (let i = 0; i < timers.length; i++) {
-      const t = timers[i];
+    const timersArr = timers;
+    // Build the due list as a linked chain (no per-frame array allocation);
+    // survivors are compacted in place. Due timers run AFTER the loop, so a
+    // callback that schedules another timer has it fire next tick, matching
+    // browser macrotask ordering.
+    let write = 0;
+    let dueHead = null;
+    let dueTail = null;
+    for (let i = 0; i < timersArr.length; i++) {
+      const t = timersArr[i];
       if (now >= t.deadline) {
-        due.push(t);
+        if (dueTail) dueTail._next = t; else dueHead = t;
+        dueTail = t;
+        t._next = null;
         if (t.repeat) {
           t.deadline = now + t.interval;
-          remaining.push(t);
+          timersArr[write++] = t;
         }
       } else {
-        remaining.push(t);
+        timersArr[write++] = t;
       }
     }
-    timers = remaining;
-    for (let i = 0; i < due.length; i++) {
-      try { due[i].cb(); } catch (e) { print("[timer error] " + e + (e && e.stack ? "\nStack:\n" + e.stack : "")); }
+    if (write < timersArr.length) timersArr.length = write;
+    for (let t = dueHead; t; t = t._next) {
+      try { t.cb(); } catch (e) { print("[timer error] " + e + (e && e.stack ? "\nStack:\n" + e.stack : "")); }
     }
 
     const frameCbs = rafCallbacks;
     rafCallbacks = [];
+    if (tracyOn) native.tracyZoneStart("RAF callbacks");
     for (let i = 0; i < frameCbs.length; i++) {
+      // Per-callback zone so the profile shows WHICH callback owns the
+      // ~66ms of JS self time (Pixi ticker update? RMMZ scene update?).
+      // Zero cost when not profiling: the name is never materialized.
+      if (tracyOn) native.tracyZoneStart("rAF[" + i + "] " + (frameCbs[i].cb.name || "anon"));
       try { frameCbs[i].cb(timestamp); } catch (e) { print("[rAF error] " + e + "\n  e.stack=[" + (e && e.stack ? e.stack : "(none)") + "]"); }
+      if (tracyOn) native.tracyZoneEnd();
     }
+    if (tracyOn) native.tracyZoneEnd();
+
+    if (tracyOn) native.tracyZoneEnd();
 
     if (globalThis.__frameCount__ === undefined) globalThis.__frameCount__ = 0;
     globalThis.__frameCount__++;
@@ -2911,6 +3025,18 @@ try {
       if (Graphics.width && Graphics.height) {
         native.setWindowSize(Graphics.width, Graphics.height);
       }
+    }
+    // Opt-in native matrix math (SONAR_NATIVE_MATH=1): offload the
+    // per-display-object transform work PixiJS does every frame to C.
+    // Patches Matrix.prototype.append, which is what Container.updateTransform
+    // calls for every node in the scene graph. Off by default because the
+    // JS<->C bridge hop can outweigh the math savings on some games; A/B it.
+    if (native.getEnv && native.getEnv("SONAR_NATIVE_MATH") === "1" &&
+        typeof PIXI !== "undefined" && PIXI.Matrix && native.matrixAppend) {
+      PIXI.Matrix.prototype.append = function (other) {
+        return native.matrixAppend(this, other);
+      };
+      print("[Shim] native matrix math enabled (PIXI.Matrix.append -> C)");
     }
   });
 

@@ -13,6 +13,7 @@
 #include <glad/glad.h>
 #include "SDL3/SDL.h"
 #include "tracy/TracyC.h"
+#include "matrix_math.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -22,10 +23,6 @@
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
-
-// TEMP DIAGNOSTIC
-unsigned long native_gl_get_draw_count(void);
-void native_gl_reset_draw_count(void);
 
 // ... rest of includes
 void register_gl_bridge(JSContext *ctx, JSValueConst gl_obj);
@@ -618,6 +615,183 @@ static JSValue js_native_quit(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_UNDEFINED;
 }
 
+// ---------------------------------------------------------------------
+// Tracy profiling bridges (JS-accessible, used by shims.js to profile the
+// internals of __tick__ and other JS hot paths without recompiling).
+// ---------------------------------------------------------------------
+
+// Runtime-toggleable Tracy zone profiling. Every Tracy zone costs a
+// timestamp + queue write even when no GUI is attached; the per-call GL
+// zones (gl.bufferSubData was traced at ~693k calls) are gated behind this
+// so normal play runs without paying for instrumentation. Enable with
+// SONAR_TRACY=1. The coarse main-loop / JS tick / event-dispatch zones stay
+// always-on so the profiler still shows frame structure.
+int g_tracy_enabled = 0;
+
+// QuickJS calls one native function per zone, so zone contexts have to be
+// stashed between tracyZoneStart() and tracyZoneEnd() calls. A stack keeps
+// nesting correct (__tick__ wraps timers and RAF inside a top-level zone).
+#define JS_TRACY_ZONE_STACK_MAX 64
+static TracyCZoneCtx g_js_zone_stack[JS_TRACY_ZONE_STACK_MAX];
+static int g_js_zone_stack_top = 0;
+
+static JSValue js_native_tracy_enabled(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    return JS_NewBool(ctx, g_tracy_enabled);
+}
+
+static JSValue js_native_get_env(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NULL;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_NULL;
+    const char *val = getenv(name);
+    JSValue r = val ? JS_NewString(ctx, val) : JS_NULL;
+    JS_FreeCString(ctx, name);
+    return r;
+}
+
+static JSValue js_native_tracy_zone_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    const char *name = JS_ToCString(ctx, argv[0]);
+    if (!name) return JS_UNDEFINED;
+    // ___tracy_alloc_srcloc_name() copies the strings into Tracy's own
+    // storage, so freeing the JS string right after is safe.
+    if (g_js_zone_stack_top < JS_TRACY_ZONE_STACK_MAX) {
+        uint64_t srcloc = ___tracy_alloc_srcloc_name(__LINE__, "shims.js", 8, "tick", 4,
+                                                     name, strlen(name), 0x40b0ff);
+        g_js_zone_stack[g_js_zone_stack_top++] =
+            ___tracy_emit_zone_begin_alloc(srcloc, 1);
+    }
+    JS_FreeCString(ctx, name);
+    return JS_UNDEFINED;
+}
+
+static JSValue js_native_tracy_zone_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)ctx; (void)this_val; (void)argc; (void)argv;
+    if (g_js_zone_stack_top > 0) {
+        ___tracy_emit_zone_end(g_js_zone_stack[--g_js_zone_stack_top]);
+    }
+    return JS_UNDEFINED;
+}
+
+static JSValue js_native_tracy_zone_text(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || g_js_zone_stack_top == 0) return JS_UNDEFINED;
+    const char *text = JS_ToCString(ctx, argv[0]);
+    if (text) {
+        ___tracy_emit_zone_text(g_js_zone_stack[g_js_zone_stack_top - 1], text, strlen(text));
+        JS_FreeCString(ctx, text);
+    }
+    return JS_UNDEFINED;
+}
+
+// ---------------------------------------------------------------------
+// Matrix / bounds math bridges. These accept the PixiJS Matrix property
+// layout ({a,b,c,d,tx,ty}) and offload the per-display-object transform
+// math to C. Wire them into the JS side (e.g. monkey-patch
+// PIXI.Matrix.prototype.append) to use; see README/shim notes.
+// ---------------------------------------------------------------------
+
+// Read the six {a,b,c,d,tx,ty} numbers off a PixiJS Matrix-shaped object.
+static int read_matrix3(JSContext *ctx, JSValueConst v, Matrix3 *m) {
+    if (!JS_IsObject(v)) return 0;
+    JSValue props[6];
+    props[0] = JS_GetPropertyStr(ctx, v, "a");
+    props[1] = JS_GetPropertyStr(ctx, v, "b");
+    props[2] = JS_GetPropertyStr(ctx, v, "c");
+    props[3] = JS_GetPropertyStr(ctx, v, "d");
+    props[4] = JS_GetPropertyStr(ctx, v, "tx");
+    props[5] = JS_GetPropertyStr(ctx, v, "ty");
+    double d[6] = {0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 6; i++) {
+        JS_ToFloat64(ctx, &d[i], props[i]);
+        JS_FreeValue(ctx, props[i]);
+    }
+    m->a = (float)d[0]; m->b = (float)d[1]; m->c = (float)d[2];
+    m->d = (float)d[3]; m->tx = (float)d[4]; m->ty = (float)d[5];
+    return 1;
+}
+
+static void write_matrix3(JSContext *ctx, JSValue obj, const Matrix3 *m) {
+    JS_SetPropertyStr(ctx, obj, "a", JS_NewFloat64(ctx, m->a));
+    JS_SetPropertyStr(ctx, obj, "b", JS_NewFloat64(ctx, m->b));
+    JS_SetPropertyStr(ctx, obj, "c", JS_NewFloat64(ctx, m->c));
+    JS_SetPropertyStr(ctx, obj, "d", JS_NewFloat64(ctx, m->d));
+    JS_SetPropertyStr(ctx, obj, "tx", JS_NewFloat64(ctx, m->tx));
+    JS_SetPropertyStr(ctx, obj, "ty", JS_NewFloat64(ctx, m->ty));
+}
+
+// native.matrixMultiply(a, b) -> new matrix object (a * b)
+static JSValue js_native_matrix_multiply(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    Matrix3 a, b, out;
+    if (!read_matrix3(ctx, argv[0], &a) || !read_matrix3(ctx, argv[1], &b))
+        return JS_UNDEFINED;
+    matrix3_multiply(&out, &a, &b);
+    JSValue obj = JS_NewObject(ctx);
+    write_matrix3(ctx, obj, &out);
+    return obj;
+}
+
+// native.matrixAppend(m, other) -> m  (mutates m in place, like Matrix.append)
+static JSValue js_native_matrix_append(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    Matrix3 self, other;
+    if (!read_matrix3(ctx, argv[0], &self) || !read_matrix3(ctx, argv[1], &other))
+        return JS_UNDEFINED;
+    matrix3_append(&self, &other);
+    write_matrix3(ctx, argv[0], &self);
+    JS_DupValue(ctx, argv[0]);
+    return argv[0];
+}
+
+// native.transformPoint(m, x, y) -> {x, y}
+static JSValue js_native_transform_point(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 3) return JS_UNDEFINED;
+    Matrix3 m;
+    if (!read_matrix3(ctx, argv[0], &m)) return JS_UNDEFINED;
+    double x = 0, y = 0;
+    JS_ToFloat64(ctx, &x, argv[1]);
+    JS_ToFloat64(ctx, &y, argv[2]);
+    float fx = (float)x, fy = (float)y;
+    matrix3_transform_point(&m, &fx, &fy);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "x", JS_NewFloat64(ctx, fx));
+    JS_SetPropertyStr(ctx, obj, "y", JS_NewFloat64(ctx, fy));
+    return obj;
+}
+
+// native.calculateBounds(m, x, y, w, h) -> {minX, minY, maxX, maxY}
+static JSValue js_native_calculate_bounds(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 5) return JS_UNDEFINED;
+    Matrix3 m;
+    if (!read_matrix3(ctx, argv[0], &m)) return JS_UNDEFINED;
+    double x = 0, y = 0, w = 0, h = 0;
+    JS_ToFloat64(ctx, &x, argv[1]);
+    JS_ToFloat64(ctx, &y, argv[2]);
+    JS_ToFloat64(ctx, &w, argv[3]);
+    JS_ToFloat64(ctx, &h, argv[4]);
+    float mnx = 0, mny = 0, mxx = 0, mxy = 0;
+    matrix3_calculate_bounds(&m, (float)x, (float)y, (float)w, (float)h,
+                             &mnx, &mny, &mxx, &mxy);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "minX", JS_NewFloat64(ctx, mnx));
+    JS_SetPropertyStr(ctx, obj, "minY", JS_NewFloat64(ctx, mny));
+    JS_SetPropertyStr(ctx, obj, "maxX", JS_NewFloat64(ctx, mxx));
+    JS_SetPropertyStr(ctx, obj, "maxY", JS_NewFloat64(ctx, mxy));
+    return obj;
+}
+
 static JSValue js_native_set_window_size(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     (void)this_val;
     if (argc < 2) return JS_UNDEFINED;
@@ -668,6 +842,24 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_set_window_size, "setWindowSize", 2));
     JS_SetPropertyStr(ctx, native, "quit",
                        JS_NewCFunction(ctx, js_native_quit, "quit", 0));
+    JS_SetPropertyStr(ctx, native, "tracyEnabled",
+                       JS_NewCFunction(ctx, js_native_tracy_enabled, "tracyEnabled", 0));
+    JS_SetPropertyStr(ctx, native, "getEnv",
+                       JS_NewCFunction(ctx, js_native_get_env, "getEnv", 1));
+    JS_SetPropertyStr(ctx, native, "tracyZoneStart",
+                       JS_NewCFunction(ctx, js_native_tracy_zone_start, "tracyZoneStart", 1));
+    JS_SetPropertyStr(ctx, native, "tracyZoneEnd",
+                       JS_NewCFunction(ctx, js_native_tracy_zone_end, "tracyZoneEnd", 0));
+    JS_SetPropertyStr(ctx, native, "tracyZoneText",
+                       JS_NewCFunction(ctx, js_native_tracy_zone_text, "tracyZoneText", 1));
+    JS_SetPropertyStr(ctx, native, "matrixMultiply",
+                       JS_NewCFunction(ctx, js_native_matrix_multiply, "matrixMultiply", 2));
+    JS_SetPropertyStr(ctx, native, "matrixAppend",
+                       JS_NewCFunction(ctx, js_native_matrix_append, "matrixAppend", 2));
+    JS_SetPropertyStr(ctx, native, "transformPoint",
+                       JS_NewCFunction(ctx, js_native_transform_point, "transformPoint", 3));
+    JS_SetPropertyStr(ctx, native, "calculateBounds",
+                       JS_NewCFunction(ctx, js_native_calculate_bounds, "calculateBounds", 5));
 
     JSValue gl = JS_NewObject(ctx);
     register_gl_bridge(ctx, gl);
@@ -768,6 +960,14 @@ static void promise_rejection_tracker(JSContext *ctx, JSValueConst promise,
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     g_engine.running = 1;
+
+    // Per-call GL Tracy zones are off unless SONAR_TRACY=1 (see
+    // g_tracy_enabled). Read it before the first frame so the whole app
+    // shares one consistent value.
+    {
+        const char *te = getenv("SONAR_TRACY");
+        g_tracy_enabled = (te && te[0] == '1');
+    }
 
     TracyCSetThreadName("Main");
     TracyCAppInfo("Sonar.js (RMMZ native)", sizeof("Sonar.js (RMMZ native)") - 1);
