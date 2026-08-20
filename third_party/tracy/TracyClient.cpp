@@ -15,6 +15,8 @@
 
 #ifdef TRACY_ENABLE
 
+#include "client/TracySleepWin.hpp"
+
 #ifdef _MSC_VER
 #  pragma warning(push, 0)
 #endif

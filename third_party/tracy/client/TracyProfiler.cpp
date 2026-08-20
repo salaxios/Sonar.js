@@ -900,9 +900,9 @@ LONG WINAPI CrashFilter( PEXCEPTION_POINTERS pExp )
         TracyLfqCommit;
     }
 
-    std::this_thread::sleep_for( std::chrono::milliseconds( 500 ) );
+    tracy::SleepMs( 500 );
     GetProfiler().RequestShutdown();
-    while( !GetProfiler().HasShutdownFinished() ) { std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) ); };
+    while( !GetProfiler().HasShutdownFinished() ) { tracy::SleepMs( 10 ); };
 
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -1158,9 +1158,9 @@ TRACY_API void TracyCrashHandler( int signal, siginfo_t* info, void* /*ucontext*
     TracyLfqPrepare( QueueType::Crash );
     TracyLfqCommit;
 
-    std::this_thread::sleep_for( std::chrono::milliseconds( 500 ) );
+    tracy::SleepMs( 500 );
     GetProfiler().RequestShutdown();
-    while( !GetProfiler().HasShutdownFinished() ) { std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) ); };
+    while( !GetProfiler().HasShutdownFinished() ) { tracy::SleepMs( 10 ); };
 
     abort();
 }
@@ -1185,7 +1185,7 @@ static void StartSystemTracing( int64_t& samplingPeriod )
         new( sysTraceThread ) Thread( SysTraceWorker, nullptr );
         Thread* prev = s_sysTraceThread.exchange( sysTraceThread );
         assert( prev == nullptr );
-        std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+        tracy::SleepMs( 1 );
     }
 }
 
@@ -1784,7 +1784,7 @@ void Profiler::Worker()
     const auto broadcastPort = 8086;
 #endif
 
-    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) tracy::SleepMs( 10 );
 
 #ifdef TRACY_USE_RPMALLOC
     rpmalloc_thread_initialize();
@@ -1903,7 +1903,7 @@ void Profiler::Worker()
             }
 
             ClearQueues( token );
-            std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+            tracy::SleepMs( 10 );
         }
     }
 
@@ -2119,7 +2119,7 @@ void Profiler::Worker()
                 else if( !m_sock->HasData() )
                 {
                     keepAlive++;
-                    std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+                    tracy::SleepMs( 10 );
                 }
             }
             else
@@ -2299,7 +2299,7 @@ void Profiler::CompressWorker()
 {
     ThreadExitHandler threadExitHandler;
     SetThreadName( "Tracy DXT1" );
-    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) tracy::SleepMs( 10 );
 
 #ifdef TRACY_USE_RPMALLOC
     rpmalloc_thread_initialize();
@@ -2355,7 +2355,7 @@ void Profiler::CompressWorker()
         }
         else
         {
-            std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+            tracy::SleepMs( 20 );
         }
 
         if( shouldExit )
@@ -3858,7 +3858,7 @@ void Profiler::SymbolWorker()
     SetThreadName( "Tracy Symbol Worker" );
     InitAllocator();
     InitCallstack();
-    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+    while( m_timeBegin.load( std::memory_order_relaxed ) == 0 ) tracy::SleepMs( 10 );
 
     for(;;)
     {
@@ -3872,7 +3872,7 @@ void Profiler::SymbolWorker()
                 return;
             }
             while( m_symbolQueue.front() ) m_symbolQueue.pop();
-            std::this_thread::sleep_for( std::chrono::milliseconds( 20 ) );
+            tracy::SleepMs( 20 );
             m_symbolsBusy.store( false, std::memory_order_release );
             continue;
         }
@@ -4051,7 +4051,7 @@ void Profiler::HandleDisconnect()
                 {
                     if( !CommitData() ) return;
                 }
-                std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+                tracy::SleepMs( 10 );
             }
         }
     }
@@ -4080,7 +4080,7 @@ void Profiler::HandleDisconnect()
             {
                 if( !CommitData() ) return;
             }
-            std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+            tracy::SleepMs( 10 );
         }
     }
 }
@@ -4102,7 +4102,7 @@ void Profiler::CalibrateTimer()
         const auto t0 = std::chrono::high_resolution_clock::now();
         const auto r0 = GetTime();
         std::atomic_signal_fence( std::memory_order_acq_rel );
-        std::this_thread::sleep_for( std::chrono::milliseconds( 200 ) );
+        tracy::SleepMs( 200 );
         std::atomic_signal_fence( std::memory_order_acq_rel );
         const auto t1 = std::chrono::high_resolution_clock::now();
         const auto r1 = GetTime();

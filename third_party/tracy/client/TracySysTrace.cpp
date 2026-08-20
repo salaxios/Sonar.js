@@ -1134,7 +1134,7 @@ void SysTraceWorker( void* ptr )
                 }
             }
             if( !traceActive.load( std::memory_order_relaxed ) ) break;
-            std::this_thread::sleep_for( std::chrono::milliseconds( 10 ) );
+            tracy::SleepMs( 10 );
             continue;
         }
 #endif
@@ -1498,7 +1498,7 @@ void SysTraceWorker( void* ptr )
         if( !traceActive.load( std::memory_order_relaxed ) ) break;
         if( !hadData )
         {
-            std::this_thread::sleep_for( std::chrono::milliseconds( 1 ) );
+            tracy::SleepMs( 1 );
         }
     }
 
