@@ -15,7 +15,10 @@ Ultramode 7 proof of concept:
 
 Bonus: Screenshots from Salaxios' The Locust (which utilises LOTS of highly visual plugins, a majority of which ran).
 
-<img width="967" height="590" alt="image" src="https://github.com/user-attachments/assets/5a2f1f3f-2190-4fc5-9c8b-e195126dd80e" />
+Bitmap Text & map title window rendering improved & different
+
+<img width="973" height="582" alt="image" src="https://github.com/user-attachments/assets/8abcdd84-c12b-4204-95d8-74e6ce3b4374" />
+
 
 - Vanilla RPGMaker MZ Games will run currently with, graphical bugs surrounding text rendering.
  
@@ -42,13 +45,8 @@ Bonus: Screenshots from Salaxios' The Locust (which utilises LOTS of highly visu
 
 - Basic keyboard functions like Z/X, Up, Right, Left, Down, Shift, etc. work.
 
-compile with:
+Check compile_instructions.txt for info on how to compile.
 
-cmake -S . -B build
+It is recommended to experiment with basic RPGMaker MZ games downloaded from Itch.io, plugins welcome, VisuStella has known issues at the moment and are not yet supported. 
 
-cmake --build build
-
-or:
-cmake -S . -B build && cmake --build build --config Release
-
-It is recommended to experiment with basic RPGMaker MZ games downloaded from Itch.io, however all Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor, or at some point in the future we will make the effekseer animations inert but have the engine continue playing anyways. we will make the effekseer animations inert but have the engine continue playing anyways.
+IMPORTANT NOTE: All Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor, or at some point in the future we will make the effekseer animations inert but have the engine continue playing anyways. we will make the effekseer animations inert but have the engine continue playing anyways.
