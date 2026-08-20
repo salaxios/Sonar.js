@@ -12,6 +12,7 @@
 #include "quickjs.h"
 #include <glad/glad.h>
 #include "SDL3/SDL.h"
+#include "tracy/TracyC.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -131,9 +132,10 @@ static void url_decode(char *dst, const char *src, size_t dst_max) {
 
 static JSValue js_native_read_file(JSContext *ctx, JSValueConst this_val,
                                     int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_NULL;
+    TracyCZoneN(zone, "native.readFile", 1);
+    if (argc < 1) { TracyCZoneEnd(zone); return JS_NULL; }
     const char *raw_path = JS_ToCString(ctx, argv[0]);
-    if (!raw_path) return JS_NULL;
+    if (!raw_path) { TracyCZoneEnd(zone); return JS_NULL; }
     char path[1024];
     url_decode(path, raw_path, sizeof(path));
     JS_FreeCString(ctx, raw_path);
@@ -152,14 +154,16 @@ static JSValue js_native_read_file(JSContext *ctx, JSValueConst this_val,
     } else {
         fprintf(stderr, "[readFile] missing: %s\n", path);
     }
+    TracyCZoneEnd(zone);
     return result;
 }
 
 static JSValue js_native_read_file_binary(JSContext *ctx, JSValueConst this_val,
                                            int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_NULL;
+    TracyCZoneN(zone, "native.readFileBinary", 1);
+    if (argc < 1) { TracyCZoneEnd(zone); return JS_NULL; }
     const char *raw_path = JS_ToCString(ctx, argv[0]);
-    if (!raw_path) return JS_NULL;
+    if (!raw_path) { TracyCZoneEnd(zone); return JS_NULL; }
     char path[1024];
     url_decode(path, raw_path, sizeof(path));
     JS_FreeCString(ctx, raw_path);
@@ -177,14 +181,16 @@ static JSValue js_native_read_file_binary(JSContext *ctx, JSValueConst this_val,
     } else {
         fprintf(stderr, "[readFileBinary] missing: %s\n", path);
     }
+    TracyCZoneEnd(zone);
     return result;
 }
 
 static JSValue js_native_decode_image(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
-    if (argc < 1) return JS_NULL;
+    TracyCZoneN(zone, "native.decodeImage", 1);
+    if (argc < 1) { TracyCZoneEnd(zone); return JS_NULL; }
     const char *raw_path = JS_ToCString(ctx, argv[0]);
-    if (!raw_path) return JS_NULL;
+    if (!raw_path) { TracyCZoneEnd(zone); return JS_NULL; }
     char path[1024];
     url_decode(path, raw_path, sizeof(path));
     JS_FreeCString(ctx, raw_path);
@@ -193,6 +199,7 @@ static JSValue js_native_decode_image(JSContext *ctx, JSValueConst this_val,
     unsigned char *pixels = stbi_load(path, &w, &h, &channels, 4);
     if (!pixels) {
         fprintf(stderr, "[decodeImage] failed: %s\n", path);
+        TracyCZoneEnd(zone);
         return JS_NULL;
     }
 
@@ -203,6 +210,7 @@ static JSValue js_native_decode_image(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, result, "width", JS_NewInt32(ctx, w));
     JS_SetPropertyStr(ctx, result, "height", JS_NewInt32(ctx, h));
     JS_SetPropertyStr(ctx, result, "data", ab);
+    TracyCZoneEnd(zone);
     return result;
 }
 
@@ -275,9 +283,10 @@ static uint32_t utf8_next_codepoint(const char **p) {
 static JSValue js_native_measure_text(JSContext *ctx, JSValueConst this_val,
                                        int argc, JSValueConst *argv) {
     (void)this_val;
+    TracyCZoneN(zone, "native.measureText", 1);
     // argv: text, fontFamily, fontSizePx, bold
     JSValue result = JS_NewObject(ctx);
-    if (argc < 3) { JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, 0)); return result; }
+    if (argc < 3) { JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, 0)); TracyCZoneEnd(zone); return result; }
     const char *text = JS_ToCString(ctx, argv[0]);
     const char *family = JS_ToCString(ctx, argv[1]);
     double size_px = 12;
@@ -289,6 +298,7 @@ static JSValue js_native_measure_text(JSContext *ctx, JSValueConst this_val,
         if (text) JS_FreeCString(ctx, text);
         if (family) JS_FreeCString(ctx, family);
         JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, 0));
+        TracyCZoneEnd(zone);
         return result;
     }
 
@@ -309,14 +319,16 @@ static JSValue js_native_measure_text(JSContext *ctx, JSValueConst this_val,
     JS_FreeCString(ctx, text);
     JS_FreeCString(ctx, family);
     JS_SetPropertyStr(ctx, result, "width", JS_NewFloat64(ctx, w));
+    TracyCZoneEnd(zone);
     return result;
 }
 
 static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
                                          int argc, JSValueConst *argv) {
     (void)this_val;
+    TracyCZoneN(zone, "native.rasterizeText", 1);
     // argv: text, fontFamily, fontSizePx, bold, r, g, b, a
-    if (argc < 3) return JS_NULL;
+    if (argc < 3) { TracyCZoneEnd(zone); return JS_NULL; }
     const char *text = JS_ToCString(ctx, argv[0]);
     const char *family = JS_ToCString(ctx, argv[1]);
     double size_px = 12;
@@ -334,6 +346,7 @@ static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
     if (!text || !text[0] || size_px <= 0) {
         if (text) JS_FreeCString(ctx, text);
         if (family) JS_FreeCString(ctx, family);
+        TracyCZoneEnd(zone);
         return JS_NULL;
     }
     if (!load_font(bold)) {
@@ -341,6 +354,7 @@ static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
         if (!once) { once = 1; fprintf(stderr, "[rasterize] NO SYSTEM FONT FOUND (checked C:/Windows/Fonts)\n"); }
         if (text) JS_FreeCString(ctx, text);
         if (family) JS_FreeCString(ctx, family);
+        TracyCZoneEnd(zone);
         return JS_NULL;
     }
 
@@ -410,6 +424,7 @@ static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
     JS_SetPropertyStr(ctx, result, "height", JS_NewInt32(ctx, h));
     JS_SetPropertyStr(ctx, result, "ascent", JS_NewInt32(ctx, baseline));
     JS_SetPropertyStr(ctx, result, "data", ab);
+    TracyCZoneEnd(zone);
     return result;
 }
 
@@ -509,6 +524,7 @@ static int scancode_to_keycode(SDL_Scancode sc) {
 }
 
 static void dispatch_keyboard_event(JSContext *ctx, const char *type, SDL_KeyboardEvent *e) {
+    TracyCZoneN(zone, "dispatch.keyboard", 1);
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchKeyboardEvent__");
     if (JS_IsFunction(ctx, fn)) {
@@ -534,9 +550,11 @@ static void dispatch_keyboard_event(JSContext *ctx, const char *type, SDL_Keyboa
     }
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, global);
+    TracyCZoneEnd(zone);
 }
 
 static void dispatch_mouse_event(JSContext *ctx, const char *type, float x, float y, int button, int buttons) {
+    TracyCZoneN(zone, "dispatch.mouse", 1);
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchMouseEvent__");
     if (JS_IsFunction(ctx, fn)) {
@@ -559,9 +577,11 @@ static void dispatch_mouse_event(JSContext *ctx, const char *type, float x, floa
     }
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, global);
+    TracyCZoneEnd(zone);
 }
 
 static void dispatch_wheel_event(JSContext *ctx, float dx, float dy) {
+    TracyCZoneN(zone, "dispatch.wheel", 1);
     JSValue global = JS_GetGlobalObject(ctx);
     JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchWheelEvent__");
     if (JS_IsFunction(ctx, fn)) {
@@ -582,6 +602,7 @@ static void dispatch_wheel_event(JSContext *ctx, float dx, float dy) {
     }
     JS_FreeValue(ctx, fn);
     JS_FreeValue(ctx, global);
+    TracyCZoneEnd(zone);
 }
 
 // Confirmed bug: Utils.isNwjs() correctly returns true (shims.js fakes
@@ -688,8 +709,10 @@ static char *path_next_to_executable(const char *filename) {
 }
 
 static int eval_file(JSContext *ctx, const char *path) {
+    TracyCZoneN(zone, "eval_file", 1);
+    TracyCZoneTextF(zone, "%s", path);
     char *src = read_text_file(path);
-    if (!src) return -1;
+    if (!src) { TracyCZoneEnd(zone); return -1; }
     JSValue result = JS_Eval(ctx, src, strlen(src), path, JS_EVAL_TYPE_GLOBAL);
     int ok = 1;
     if (JS_IsException(result)) {
@@ -711,6 +734,7 @@ static int eval_file(JSContext *ctx, const char *path) {
     }
     JS_FreeValue(ctx, result);
     free(src);
+    TracyCZoneEnd(zone);
     return ok ? 0 : -1;
 }
 
@@ -744,6 +768,9 @@ static void promise_rejection_tracker(JSContext *ctx, JSValueConst promise,
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     g_engine.running = 1;
+
+    TracyCSetThreadName("Main");
+    TracyCAppInfo("Sonar.js (RMMZ native)", sizeof("Sonar.js (RMMZ native)") - 1);
 
     // stdout is only line-buffered when attached to a real terminal;
     // redirected to a file or pipe (e.g. `> output.log`) it becomes fully
@@ -881,6 +908,7 @@ eval_file(g_engine.ctx, "js/main.js");
 
     SDL_Event event;
     while (g_engine.running) {
+        TracyCZoneN(frame_zone, "Main loop", 1);
         while (SDL_PollEvent(&event)) {
             switch (event.type) {
                 case SDL_EVENT_QUIT:
@@ -917,7 +945,9 @@ eval_file(g_engine.ctx, "js/main.js");
         JSValue global = JS_GetGlobalObject(g_engine.ctx);
         JSValue tick_fn = JS_GetPropertyStr(g_engine.ctx, global, "__tick__");
         JSValue ts = JS_NewFloat64(g_engine.ctx, (double)SDL_GetTicks());
+        TracyCZoneN(tick_zone, "JS tick", 1);
         JSValue result = JS_Call(g_engine.ctx, tick_fn, global, 1, &ts);
+        TracyCZoneEnd(tick_zone);
         if (JS_IsException(result)) {
             JSValue exc = JS_GetException(g_engine.ctx);
             const char *msg = JS_ToCString(g_engine.ctx, exc);
@@ -943,6 +973,8 @@ eval_file(g_engine.ctx, "js/main.js");
         while (JS_ExecutePendingJob(g_engine.rt, &pctx) > 0) {}
 
         SDL_GL_SwapWindow(g_engine.window);
+        TracyCFrameMark;
+        TracyCZoneEnd(frame_zone);
     }
 
     JS_FreeContext(g_engine.ctx);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(rmmz_native C)
+project(rmmz_native C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -40,6 +40,20 @@ include_directories(
 )
 
 # ---------------------------------------------------------------------
+# Tracy profiler client. Vendored under third_party/tracy; enabled with
+# TRACY_ENABLE so the running app accepts connections from the Tracy
+# profiler GUI (default port 8086). Compile TracyClient.cpp with C++.
+# ---------------------------------------------------------------------
+add_library(tracy_client STATIC ${THIRD_PARTY_DIR}/tracy/TracyClient.cpp)
+target_compile_features(tracy_client PUBLIC cxx_std_11)
+target_include_directories(tracy_client PUBLIC ${THIRD_PARTY_DIR}/tracy)
+target_compile_definitions(tracy_client PUBLIC TRACY_ENABLE)
+if(WIN32)
+    target_link_libraries(tracy_client PUBLIC ws2_32 dbghelp secur32)
+    target_compile_definitions(tracy_client PUBLIC WINVER=0x0A00 _WIN32_WINNT=0x0A00)
+endif()
+
+# ---------------------------------------------------------------------
 # Main executable
 # ---------------------------------------------------------------------
 add_executable(rmmz_native
@@ -69,6 +83,7 @@ target_link_libraries(rmmz_native PRIVATE
     ${QJS_TARGET}
     SDL3::SDL3
     glad
+    tracy_client
 )
 
 # System OpenGL
@@ -81,13 +96,12 @@ else()
 endif()
 
 # ---------------------------------------------------------------------
-# MinGW: static-link libgcc and winpthread so no DLLs are needed at runtime
+# MinGW: static-link the whole C/C++ runtime so no GCC DLLs (libstdc++,
+# libwinpthread, libgcc) are needed at runtime. System DLLs (kernel32,
+# ws2_32, opengl32, ...) stay dynamic as usual.
 # ---------------------------------------------------------------------
 if(MINGW)
-    target_link_options(rmmz_native PRIVATE
-        -static-libgcc
-        -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic
-    )
+    target_link_options(rmmz_native PRIVATE -static)
 endif()
 
 # ---------------------------------------------------------------------

@@ -6,6 +6,7 @@
 
 #include "quickjs.h"
 #include <glad/glad.h>
+#include "tracy/TracyC.h"
 
 // ------------------------------------------------------------------
 // Bridge-side state for WebGL-only pixelStorei flags
@@ -232,6 +233,7 @@ static JSValue js_bindVertexArray(JSContext *ctx, JSValueConst t, int argc, JSVa
 
 static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.bufferData", 1);
     GLenum target = arg_uint(ctx, argv[0]);
     GLenum usage = arg_uint(ctx, argv[2]);
     if (JS_IsNumber(argv[1])) {
@@ -247,10 +249,12 @@ static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueCo
             else g_last_vb_len = 0;
         }
     }
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.bufferSubData", 1);
     GLenum target = arg_uint(ctx, argv[0]);
     GLintptr offset = (GLintptr)arg_int(ctx, argv[1]);
     size_t len = 0;
@@ -261,6 +265,7 @@ static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValu
         memcpy(g_last_vb + offset, data, len);
         if ((size_t)offset + len > g_last_vb_len) g_last_vb_len = offset + len;
     }
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 
@@ -302,6 +307,7 @@ static uint8_t *get_image_source_pixels(JSContext *ctx, JSValueConst source,
 
 static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.texImage2D", 1);
     GLenum target = arg_uint(ctx, argv[0]);
     GLint level = arg_int(ctx, argv[1]);
 
@@ -331,6 +337,7 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
         }
         glTexImage2D(target, level, gl_internal, w, h, 0, format, type, pixels);
         if (scratch) free(scratch);
+        TracyCZoneEnd(zone);
         return JS_UNDEFINED;
     }
 
@@ -359,11 +366,13 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
     }
     glTexImage2D(target, level, gl_internal, width, height, border, format, type, pixels);
     if (scratch) free(scratch);
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 
 static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.texSubImage2D", 1);
     GLenum target = arg_uint(ctx, argv[0]);
     GLint level = arg_int(ctx, argv[1]);
 
@@ -395,6 +404,7 @@ static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValu
         }
         glTexSubImage2D(target, level, xoffset, yoffset, w, h, format, type, pixels);
         if (scratch) free(scratch);
+        TracyCZoneEnd(zone);
         return JS_UNDEFINED;
     }
 
@@ -418,6 +428,7 @@ static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValu
     }
     glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
     if (scratch) free(scratch);
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 
@@ -668,24 +679,30 @@ static JSValue js_vertexAttribDivisor(JSContext *ctx, JSValueConst t, int argc, 
     (void)t; glVertexAttribDivisor(arg_uint(ctx, argv[0]), arg_uint(ctx, argv[1])); return JS_UNDEFINED;
 }
 static JSValue js_drawArrays(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
-    (void)t; g_draw_count++; glDrawArrays(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2]));
+    (void)t; g_draw_count++; TracyCZoneN(zone, "gl.drawArrays", 1); glDrawArrays(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2])); TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawElements(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t; g_draw_count++;
+    TracyCZoneN(zone, "gl.drawElements", 1);
     glDrawElements(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                     (const void *)(intptr_t)arg_int(ctx, argv[3]));
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawArraysInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.drawArraysInstanced", 1);
     glDrawArraysInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2]), arg_int(ctx, argv[3]));
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawElementsInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
+    TracyCZoneN(zone, "gl.drawElementsInstanced", 1);
     glDrawElementsInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                              (const void *)(intptr_t)arg_int(ctx, argv[3]), arg_int(ctx, argv[4]));
+    TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
 static JSValue js_drawBuffers(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
@@ -766,7 +783,7 @@ static JSValue js_blendEquationSeparate(JSContext *ctx, JSValueConst t, int argc
     (void)t; glBlendEquationSeparate(arg_uint(ctx, argv[0]), arg_uint(ctx, argv[1])); return JS_UNDEFINED;
 }
 static JSValue js_clear(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
-    (void)t; glClear((GLbitfield)arg_uint(ctx, argv[0])); return JS_UNDEFINED;
+    (void)t; TracyCZoneN(zone, "gl.clear", 1); glClear((GLbitfield)arg_uint(ctx, argv[0])); TracyCZoneEnd(zone); return JS_UNDEFINED;
 }
 static JSValue js_clearColor(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t; glClearColor(arg_float(ctx, argv[0]), arg_float(ctx, argv[1]), arg_float(ctx, argv[2]), arg_float(ctx, argv[3])); return JS_UNDEFINED;

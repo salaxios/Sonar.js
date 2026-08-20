@@ -67,8 +67,47 @@ it locates shims.js and Project1 relative to the executable, so keep them
 next to it). Vanilla RPG Maker MZ projects placed in Project1 will run.
 
 --------------------------------------------------------------------------
+Profiling with Tracy
+--------------------------------------------------------------------------
+The build has the Tracy client embedded (vendored under third_party/tracy,
+enabled via TRACY_ENABLE). While rmmz_native runs it listens on TCP port
+8086, so you can attach the Tracy profiler GUI live with zero code changes.
+
+1. Get the profiler GUI. Prebuilt binaries for Windows are on the Tracy
+   releases page:  https://github.com/wolfpld/tracy/releases
+   (grab "tracy-profiler" / "Tracy-*.zip" for Windows, or build it with
+   CMake from a checkout of the tracy repo).
+
+2. Launch the game:
+       build\rmmz_native.exe
+
+3. In the Tracy GUI, click Connect (or press C). It connects to localhost:8086
+   by default; the app keeps running and the profiler attaches live.
+
+Useful views / what's instrumented:
+  * "Frames" -- per-frame timings via TracyCFrameMark at the end of each loop.
+  * Timeline zones: Main loop, JS tick, dispatch.keyboard/mouse/wheel,
+    native.rasterizeText, native.measureText, native.decodeImage,
+    native.readFile/Binary, eval_file (startup/load times), and per-call GL
+    zones (gl.drawArrays/drawElements/texImage2D/bufferData, etc.).
+
+Profiling is built into every build. To strip it out for a release build,
+delete the tracy_client target / TRACY_ENABLE define in CMakeLists.txt (or
+build without it); with TRACY_ENABLE undefined TracyC* macros compile to
+nothing.
+
+--------------------------------------------------------------------------
 Known issues / troubleshooting
 --------------------------------------------------------------------------
+* "libwinpthread-1.dll was not found" / "0xc000007b" on startup (MinGW):
+  Since TracyClient.cpp is C++, the executable is now linked by the C++
+  driver, which drags in libstdc++-6.dll and libwinpthread-1.dll. The
+  MinGW section of CMakeLists.txt uses `-static` so all GCC runtime DLLs
+  are statically linked and the exe runs standalone. If you get these
+  errors, (re)build with the current CMakeLists.txt and delete any
+  libstdc++-6.dll / libwinpthread-1.dll / libgcc_s_*.dll you may have
+  copied next to the exe -- Windows loads DLLs from the exe's folder
+  first, and a stale/wrong-bitness copy overrides the static runtime.
 * SDL 3.5.0 vs. new Windows SDK headers:
   With very recent mingw-w64 / Windows SDKs, SDL's vendored header
   third_party/SDL/src/core/windows/gameinput/gameinput.h redefines
