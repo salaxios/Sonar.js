@@ -4,6 +4,19 @@ Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM 
 
 Ultimate goal/direction to work toward is to create something like or similar to EasyRPG but for RPGMaker MZ (or for PixiJS v5 in general, since EasyRPG is just an RPGMaker interpreter and not a complete software emulation layer).
 
+Experimental changes:
+
+- Tracy profiler implemented to profile lag, so that we can optimize.
+- Improved but incomplete Support for Bitmap text rendering plugin (WIP)
+
+Ultramode 7 proof of concept:
+<img width="1187" height="663" alt="image" src="https://github.com/user-attachments/assets/52dad355-3b80-4fc1-a87d-3182c29a1398" />
+
+
+Bonus: Screenshots from Salaxios' The Locust (which utilises LOTS of highly visual plugins, a majority of which ran).
+
+<img width="967" height="590" alt="image" src="https://github.com/user-attachments/assets/5a2f1f3f-2190-4fc5-9c8b-e195126dd80e" />
+
 - Vanilla RPGMaker MZ Games will run currently with, graphical bugs surrounding text rendering.
  
 - Fonts do not work, it just loads a default font.
@@ -35,6 +48,7 @@ cmake -S . -B build
 
 cmake --build build
 
-ResourceHacker can be used to apply icon.ico to the Sonar.js executable.
+or:
+cmake -S . -B build && cmake --build build --config Release
 
-It is recommended to experiment with basic RPGMaker MZ games downloaded from Itch.io, however all Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor, or at some point in the future we will make the effekseer animations inert but have the engine continue playing anyways.
+It is recommended to experiment with basic RPGMaker MZ games downloaded from Itch.io, however all Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor, or at some point in the future we will make the effekseer animations inert but have the engine continue playing anyways. we will make the effekseer animations inert but have the engine continue playing anyways.
