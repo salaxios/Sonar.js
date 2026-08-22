@@ -805,6 +805,21 @@ static JSValue js_native_set_window_size(JSContext *ctx, JSValueConst this_val, 
     return JS_UNDEFINED;
 }
 
+// Returns QuickJS heap stats {allocSize, usedSize} so the JS side can watch
+// GC pressure frame-by-frame (correlate with unzoned Tracy gaps).
+// Note: quickjs-ng's JSMemoryUsage has no gc_count field.
+static JSValue js_native_memory_usage(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    (void)argc;
+    (void)argv;
+    JSMemoryUsage mu;
+    JS_ComputeMemoryUsage(g_engine.rt, &mu);
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "allocSize", JS_NewInt64(ctx, (int64_t)mu.malloc_size));
+    JS_SetPropertyStr(ctx, obj, "usedSize", JS_NewInt64(ctx, (int64_t)mu.memory_used_size));
+    return obj;
+}
+
 static void register_native_bridge(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -844,6 +859,8 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_quit, "quit", 0));
     JS_SetPropertyStr(ctx, native, "tracyEnabled",
                        JS_NewCFunction(ctx, js_native_tracy_enabled, "tracyEnabled", 0));
+    JS_SetPropertyStr(ctx, native, "memoryUsage",
+                       JS_NewCFunction(ctx, js_native_memory_usage, "memoryUsage", 0));
     JS_SetPropertyStr(ctx, native, "getEnv",
                        JS_NewCFunction(ctx, js_native_get_env, "getEnv", 1));
     JS_SetPropertyStr(ctx, native, "tracyZoneStart",

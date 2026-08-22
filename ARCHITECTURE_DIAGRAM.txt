@@ -1,0 +1,344 @@
+Sonar.js Architecture - High Level Overview
+==========================================
+
+┌─────────────────────────────────────────────────────────────────┐
+│                         DESKTOP APPLICATION                       │
+│                    (RPG Maker MZ Game Runtime)                     │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│                      C NATIVE LAYER                                │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  main.c - Core Runtime & Event Loop                        │  │
+│  │  • SDL3 initialization (window, input, audio)             │  │
+│  │  • OpenGL context setup (4.1 Core Profile)                  │  │
+│  │  • QuickJS runtime & context creation                      │  │
+│  │  • Main event loop (SDL events → JS dispatch)               │  │
+│  │  • Native bridge registration                              │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  native_gl.c - WebGL Bridge Implementation                 │  │
+│  │  • WebGL2 function implementations                          │  │
+│  │  • Shader compilation & program linking                    │  │
+│  │  • Texture/buffer management                               │  │
+│  │  • Draw call execution                                      │  │
+│  │  • Pixel processing (flip, premultiply)                    │  │
+│  └────────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  matrix_math.h - Matrix Operations                          │  │
+│  │  • Matrix multiplication & appending                        │  │
+│  │  • Point transformation                                    │  │
+│  │  • Bounds calculation                                      │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│                   DEPENDENCIES LAYER                              │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐           │
+│  │ QuickJS  │ │  SDL3    │ │  GLAD    │ │  Tracy   │           │
+│  │ (JS Eng) │ │(Platform)│ │(OpenGL)  │ │(Profiler)│           │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘           │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐                        │
+│  │   STB    │ │miniaudio │ │  OpenGL  │                        │
+│  │ (Img/Font)│ │ (Audio)  │ │  (System)│                        │
+│  └──────────┘ └──────────┘ └──────────┘                        │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│              JAVASCRIPT NATIVE BRIDGE                             │
+│  (C functions exposed to JavaScript via QuickJS)                 │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ File I/O:           Text Rendering:      Audio:              │  │
+│  │ • readFile          • rasterizeText     • audioInit         │  │
+│  │ • readFileBinary    • measureText       • (miniaudio)       │  │
+│  │ • decodeImage                                               │  │
+│  ├────────────────────────────────────────────────────────────┤  │
+│  │ Storage:            Input:              Matrix Math:        │  │
+│  │ • storageSet        • Keyboard events   • matrixMultiply    │  │
+│  │ • storageGet        • Mouse events      • matrixAppend      │  │
+│  │                     • Wheel events      • transformPoint    │  │
+│  ├────────────────────────────────────────────────────────────┤  │
+│  │ WebGL Bridge:       Profiling:         Window:             │  │
+│  │ • All gl.* funcs    • Tracy zones      • setWindowSize      │  │
+│  │ • Shader ops        • Performance      • quit              │  │
+│  │ • Texture ops                              metrics           │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│                   JAVASCRIPT SHIMS LAYER                          │
+│              (Browser Environment Simulation)                    │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ Core Browser Objects:     Specialized Stubs:                │  │
+│  │ • window                  • WebAssembly (inert)             │  │
+│  │ • document                • Worker (stub)                  │  │
+│  │ • navigator               • Effekseer (stub)               │  │
+│  │ • console                                                │  │
+│  ├────────────────────────────────────────────────────────────┤  │
+│  │ Graphics & Media:         Network & Storage:               │  │
+│  │ • Canvas 2D context       • LocalStorage (via native)      │  │
+│  │ • WebGL context           • IndexedDB (via native)         │  │
+│  │ • Image/Bitmap loading    • Fetch (via native)             │  │
+│  │ • Audio (via native)                                     │  │
+│  ├────────────────────────────────────────────────────────────┤  │
+│  │ Event System:             Optimization Hooks:               │  │
+│  │ • Event dispatch          • Batch buffer uploads           │  │
+│  │ • DOM events              • Tracy profiling integration    │  │
+│  │ • Custom events           • Matrix math offloading          │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────────────┐
+│                 RPG MAKER MZ GAME LAYER                           │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │ RMMZ Engine Core:         Game Content:                     │  │
+│  │ • PixiJS v5.3.12          • data/ (System.json, maps)      │  │
+│  │ • rmmz_core.js            • img/ (characters, system)       │  │
+│  │ • rmmz_managers.js        • audio/ (BGM, BGS, ME, SE)      │  │
+│  │ • rmmz_objects.js         • js/ (plugins, main.js)          │  │
+│  │ • rmmz_scenes.js                                             │  │
+│  │ • rmmz_sprites.js                                             │  │
+│  │ • rmmz_windows.js                                             │  │
+│  ├────────────────────────────────────────────────────────────┤  │
+│  │ Plugin System:           Game Logic:                        │  │
+│  │ • plugins.js             • Scene management                 │  │
+│  │ • VisuStella (partial)   • Sprite rendering                 │  │
+│  │ • UltraMode7 (works)      • Window system                    │  │
+│  │ • Community plugins       • Database management             │  │
+│  │   (variable support)      • Save/Load system                 │  │
+│  └────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+
+
+DATA FLOW DIAGRAMS
+==================
+
+Startup Flow:
+-------------
+C main()
+  │
+  ├─► SDL3_Init (window, GL context, input)
+  │
+  ├─► QuickJS_Init (runtime, context)
+  │
+  ├─► Register_Native_Bridge (C→JS functions)
+  │
+  ├─► Load shims.js (browser environment)
+  │
+  ├─► Change to Project1 directory
+  │
+  ├─► Load RMMZ libraries:
+  │   ├─► pixi.js
+  │   ├─► pako.min.js
+  │   ├─► localforage.min.js
+  │   └─► (skip vorbisdecoder.js - no WASM)
+  │
+  ├─► Load RMMZ engine files:
+  │   ├─► rmmz_core.js
+  │   ├─► rmmz_managers.js
+  │   ├─► rmmz_objects.js
+  │   ├─► rmmz_scenes.js
+  │   ├─► rmmz_sprites.js
+  │   ├─► rmmz_windows.js
+  │   ├─► plugins.js
+  │   └─► main.js
+  │
+  ├─► Fire 'load' event (triggers RMMZ boot)
+  │
+  └─► Enter Main Loop
+
+
+Main Loop Flow:
+---------------
+while (running):
+  │
+  ├─► SDL_PollEvent (input processing)
+  │   ├─► Keyboard → __dispatchKeyboardEvent__
+  │   ├─► Mouse → __dispatchMouseEvent__
+  │   └─► Wheel → __dispatchWheelEvent__
+  │
+  ├─► JS_Tick (__tick__ function)
+  │   ├─► PixiJS rendering updates
+  │   ├─► Game logic updates
+  │   └─► Scene management
+  │
+  ├─► JS_ExecutePendingJob (async operations)
+  │
+  ├─► SDL_GL_SwapWindow (display frame)
+  │
+  └─► Tracy_FrameMark (profiling)
+
+
+Rendering Pipeline:
+-------------------
+RMMZ Display Object
+  │
+  ├─► PixiJS RenderTexture
+  │
+  ├─► WebGL Rendering Commands
+  │
+  ├─► Native WebGL Bridge (native_gl.c)
+  │   ├─► Convert JS parameters to GL types
+  │   ├─► Process textures (flip/premultiply)
+  │   ├─► Upload buffer data
+  │   └─► Execute GL draw calls
+  │
+  └─► OpenGL (via GLAD)
+      ├─► Vertex processing
+      ├─► Fragment shading
+      ├─► Rasterization
+      └─► Framebuffer output
+
+
+File Loading Flow:
+------------------
+RMMZ Asset Request
+  │
+  ├─► URL path (percent-encoded)
+  │
+  ├─► Decode URL → filesystem path
+  │
+  ├─► Native Bridge Call
+  │   ├─► native.readFile() (text data)
+  │   ├─► native.readFileBinary() (binary data)
+  │   └─► native.decodeImage() (images via stb_image)
+  │
+  └─► Return to JS
+      ├─► String (text)
+      ├─► ArrayBuffer (binary)
+      └─► Image object (width, height, RGBA data)
+
+
+Input Processing Flow:
+----------------------
+SDL Input Event
+  │
+  ├─► Keyboard Event
+  │   ├─► Convert scancode → keycode
+  │   └─► __dispatchKeyboardEvent__(type, key, modifiers)
+  │
+  ├─► Mouse Event
+  │   ├─► Track position & button state
+  │   └─► __dispatchMouseEvent__(type, x, y, button, buttons)
+  │
+  └─► Wheel Event
+      └─► __dispatchWheelEvent__(dx, dy)
+          │
+          └─► RMMZ Input Handler
+              ├─► Map keys to game controls
+              └─► Trigger game actions
+
+
+KEY ARCHITECTURAL DECISIONS
+===========================
+
+1. QuickJS over V8/SpiderMonkey
+   - Small footprint (~1MB vs ~50MB)
+   - Simple C API
+   - No external dependencies
+   - Sufficient ES6+ support
+
+2. OpenGL over Direct3D/Metal
+   - Cross-platform compatibility
+   - WebGL2 compatibility layer
+   - Mature ecosystem
+   - Direct hardware access
+
+3. Shims over Full Browser
+   - Minimal maintenance surface
+   - Only implement what RMMZ uses
+   - Better performance
+   - No browser engine dependency
+
+4. Native Audio over Web Audio API
+   - Cross-platform support
+   - No audio engine complexity
+   - Direct file playback
+   - Lower latency
+
+5. System Fonts over Web Fonts
+   - No network dependency
+   - Faster loading
+   - Native rendering
+   - Better integration
+
+
+PERFORMANCE OPTIMIZATIONS
+==========================
+
+1. Tracy Profiling (Optional)
+   - SONAR_TRACY=1 enables detailed profiling
+   - Frame timing analysis
+   - Hot path identification
+   - JS-accessible zones
+
+2. Batch Buffer Uploads (Optional)
+   - SONAR_BATCH_UPLOADS=1 enables
+   - Deferred bufferSubData operations
+   - Single flush per draw call
+   - Reduced JS→C crossings
+
+3. Native Matrix Math
+   - Offloaded to C
+   - Faster than JS math
+   - Critical for PixiJS transforms
+   - Bounds calculation acceleration
+
+4. Optimized Text Measurement
+   - Separate measureText() function
+   - Skips bitmap generation
+   - Critical for word-wrap performance
+   - Reduces allocation overhead
+
+
+CURRENT LIMITATIONS
+===================
+
+Known Issues:
+- Font support: Default system font only
+- Icon rendering: Entire sheet instead of individual icons
+- Face rendering: Entire face sheet instead of individual faces
+- Save/Load: Basic implementation only
+- Audio: No Web Audio API compatibility
+- Effekseer: WASM effects not supported (PNG animations only)
+- Video: Not implemented
+- Touch UI: Not implemented
+
+Plugin Compatibility:
+- Vanilla RMMZ: Mostly working (text rendering bugs)
+- FOSSIL: Should theoretically work
+- VisuStella: Known issues, not fully supported
+- UltraMode7: Works (proof of concept)
+- Community plugins: Variable support
+
+
+BUILD STRUCTURE
+===============
+
+Sonar.js/
+├── src/
+│   ├── main.c              # Core runtime & event loop
+│   ├── native_gl.c         # WebGL bridge
+│   ├── matrix_math.h       # Matrix operations
+│   ├── shims.js            # Browser environment
+│   └── Project1/           # Sample game
+├── third_party/
+│   ├── quickjs-ng/         # JavaScript engine
+│   ├── SDL/                # Platform abstraction
+│   ├── glad/               # OpenGL loader
+│   ├── stb/                # Image/font libraries
+│   ├── miniaudio/          # Audio library
+│   └── tracy/              # Profiler
+├── CMakeLists.txt          # Build configuration
+└── README.md               # Documentation
+
+Build Process:
+1. CMake configures dependencies
+2. Build quickjs-ng library
+3. Build SDL3 library
+4. Build GLAD (header-only)
+5. Compile main.c & native_gl.c
+6. Link with dependencies
+7. Copy shims.js to build directory
+8. Copy Project1 to build directory
+9. Generate executable

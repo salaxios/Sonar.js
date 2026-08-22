@@ -149,6 +149,23 @@
   const native = globalThis.__native__;
   if (!native) throw new Error("shims.js: no __native__ bridge");
 
+  // Some third-party plugins reference $gameLighting (ShoraLighting)
+  // unconditionally and even call methods on it ($gameLighting.setOffset()).
+  // When ShoraLighting is disabled we provide a no-op Proxy: every property
+  // read returns a callable no-op, every numeric coercion yields 0. If
+  // ShoraLighting actually loads, it replaces this with the real object.
+  if (typeof globalThis.$gameLighting === 'undefined') {
+    globalThis.$gameLighting = new Proxy(function () {}, {
+      get: function (target, prop) {
+        if (prop === Symbol.toPrimitive) return function () { return 0; };
+        if (prop === 'valueOf') return function () { return 0; };
+        if (prop === 'toString') return function () { return ''; };
+        return function () {};
+      },
+      apply: function () { return undefined; }
+    });
+  }
+
   // Cache whether per-call Tracy profiling is on (SONAR_TRACY=1) so __tick__
   // never pays a JS->C bridge hop every frame just to ask. Off by default:
   // the per-call GL zones are the #1 measured overhead at high call counts.
@@ -384,18 +401,32 @@
     rafCallbacks = rafCallbacks.filter(function (e) { return e.id !== id; });
   };
   globalThis.__tick__ = function (timestamp) {
-    // The RMMZ/Pixi ticker re-registers a single rAF per frame, so the hot
-    // path here is just: swap the rAF list, run it. Timers are rare
-    // (loader/async one-shots). Compact timers in place so the common frame
-    // allocates no arrays at all.
-    if (tracyOn) native.tracyZoneStart("JS tick internals");
+    // GC pressure watch — OPT-IN (SONAR_GC_WATCH=1). Disabled by default:
+    // JS_ComputeMemoryUsage walks the whole heap and costs real ms.
+    if (globalThis.__gcWatch_ === undefined) {
+      globalThis.__gcWatch_ = !!(native.getEnv && native.getEnv("SONAR_GC_WATCH") === "1");
+    }
+    if (globalThis.__gcWatch_ && native.memoryUsage && (globalThis.__gcFrame_ = ((globalThis.__gcFrame_ || 0) + 1)) % 30 === 0) {
+      const mu = native.memoryUsage();
+      if (globalThis.__gcLastUsed_ === undefined) globalThis.__gcLastUsed_ = mu.usedSize;
+      else if (globalThis.__gcLastUsed_ - mu.usedSize > 262144) {
+        print("[gc] freed ~" + Math.round((globalThis.__gcLastUsed_ - mu.usedSize) / 1024) +
+              "KB, now " + Math.round(mu.usedSize / 1024) + "KB frame=" + timestamp);
+        globalThis.__gcLastUsed_ = mu.usedSize;
+      } else if (mu.usedSize > globalThis.__gcLastUsed_) {
+        globalThis.__gcLastUsed_ = mu.usedSize;
+      }
+    }
+    if (tracyOn) {
+      if (globalThis.__patchRMMZProfiling__) globalThis.__patchRMMZProfiling__();
+      native.tracyZoneStart("JS tick internals");
+    }
 
     const now = performance.now();
     const timersArr = timers;
-    // Build the due list as a linked chain (no per-frame array allocation);
-    // survivors are compacted in place. Due timers run AFTER the loop, so a
-    // callback that schedules another timer has it fire next tick, matching
-    // browser macrotask ordering.
+
+    // Profile timer processing
+    if (tracyOn) native.tracyZoneStart("Timers processing");
     let write = 0;
     let dueHead = null;
     let dueTail = null;
@@ -414,33 +445,513 @@
       }
     }
     if (write < timersArr.length) timersArr.length = write;
+    if (tracyOn) native.tracyZoneEnd();
+
+    // Profile timer execution
+    if (tracyOn) native.tracyZoneStart("Timers execution");
     for (let t = dueHead; t; t = t._next) {
       try { t.cb(); } catch (e) { print("[timer error] " + e + (e && e.stack ? "\nStack:\n" + e.stack : "")); }
     }
+    if (tracyOn) native.tracyZoneEnd();
 
+    // Profile rAF callbacks
     const frameCbs = rafCallbacks;
     rafCallbacks = [];
     if (tracyOn) native.tracyZoneStart("RAF callbacks");
     for (let i = 0; i < frameCbs.length; i++) {
-      // Per-callback zone so the profile shows WHICH callback owns the
-      // ~66ms of JS self time (Pixi ticker update? RMMZ scene update?).
-      // Zero cost when not profiling: the name is never materialized.
-      if (tracyOn) native.tracyZoneStart("rAF[" + i + "] " + (frameCbs[i].cb.name || "anon"));
-      try { frameCbs[i].cb(timestamp); } catch (e) { print("[rAF error] " + e + "\n  e.stack=[" + (e && e.stack ? e.stack : "(none)") + "]"); }
-      if (tracyOn) native.tracyZoneEnd();
+      // Label built ONCE per callback and cached — building it here every
+      // frame allocated thousands of throwaway strings/sec, driving periodic
+      // major GC cycles (the ~50ms spikes every couple of seconds).
+      const entry = frameCbs[i];
+      let label = entry.__label;
+      if (label === undefined) {
+        label = entry.__label = "rAF " + (entry.cb.name || "anon");
+      }
+      native.tracyZoneStart(label);
+      try {
+        entry.cb(timestamp);
+      } catch (e) {
+        print("[rAF error] " + e + "\n  e.stack=[" + (e && e.stack ? e.stack : "(none)") + "]");
+      } finally {
+        native.tracyZoneEnd();
+      }
     }
     if (tracyOn) native.tracyZoneEnd();
 
     if (tracyOn) native.tracyZoneEnd();
-
-    if (globalThis.__frameCount__ === undefined) globalThis.__frameCount__ = 0;
-    globalThis.__frameCount__++;
-    if (globalThis.__frameCount__ % 60 === 1) {
-      const app = (typeof Graphics !== "undefined" && Graphics._app) ? Graphics._app : null;
-      const scene = (typeof SceneManager !== "undefined" && SceneManager._scene) ? SceneManager._scene.constructor.name : "null";
-      print("[Frame " + globalThis.__frameCount__ + "] rAF=" + frameCbs.length + " app=" + (!!app) + " scene=" + scene);
-    }
   };
+
+  // Profile common RMMZ/PixiJS functions to identify the anon rAF callback.
+  // shims.js runs BEFORE the game's scripts define SceneManager/PIXI/etc., so
+  // we retry on each tick until the globals exist, then stop retrying.
+  if (tracyOn) {
+    let rmmzPatched = false;
+    globalThis.__patchRMMZProfiling__ = function () {
+      if (rmmzPatched) return;
+      // Profile SceneManager if it exists
+      if (typeof SceneManager !== 'undefined' && SceneManager.update && !SceneManager.update.__tracyWrapped) {
+        const originalSceneUpdate = SceneManager.update;
+        SceneManager.update = function () {
+          native.tracyZoneStart("SceneManager.update");
+          try {
+            return originalSceneUpdate.call(this);
+          } finally {
+            native.tracyZoneEnd();
+          }
+        };
+        SceneManager.update.__tracyWrapped = true;
+      }
+
+      // Profile PixiJS ticker - DETAILED VERSION: wrap each registered
+      // listener fn so the ORIGINAL update() still drives everything exactly
+      // once; we only add a Tracy zone around each listener invocation.
+      if (typeof PIXI !== 'undefined' && PIXI.Ticker && PIXI.Ticker.prototype.update && !PIXI.Ticker.prototype.update.__tracyWrapped) {
+        const nativeObj = native;
+        const originalTickerUpdate = PIXI.Ticker.prototype.update;
+        PIXI.Ticker.prototype.update = function (time) {
+          nativeObj.tracyZoneStart("PIXI.Ticker.update");
+          try {
+            for (let listener = this._head; listener; listener = listener.next) {
+              if (!listener.fn || listener.fn.__tracyWrapped) continue;
+              const orig = listener.fn;
+              const label = "Ticker listener " + (orig.name || "anon");
+              const wrapped = function (delta) {
+                nativeObj.tracyZoneStart(label);
+                try {
+                  return orig.apply(this, arguments);
+                } finally {
+                  nativeObj.tracyZoneEnd();
+                }
+              };
+              wrapped.__tracyWrapped = true;
+              wrapped.__tracyOrig = orig;
+              listener.fn = wrapped;
+            }
+            return originalTickerUpdate.call(this, time);
+          } finally {
+            nativeObj.tracyZoneEnd();
+          }
+        };
+        PIXI.Ticker.prototype.update.__tracyWrapped = true;
+      }
+
+      // Profile Scene updates if they exist
+      if (typeof Scene_Base !== 'undefined' && Scene_Base.prototype.update && !Scene_Base.prototype.update.__tracyWrapped) {
+        const originalSceneBaseUpdate = Scene_Base.prototype.update;
+        Scene_Base.prototype.update = function () {
+          native.tracyZoneStart("Scene_Base.update");
+          try {
+            return originalSceneBaseUpdate.call(this);
+          } finally {
+            native.tracyZoneEnd();
+          }
+        };
+        Scene_Base.prototype.update.__tracyWrapped = true;
+      }
+
+      // ----------------------------------------------------------------
+      // NW.JS-COMPATIBLE SCRIPT CALL TOLERANCE. In NW.js hosts, invalid
+      // code inside an event's "Script..." command usually gets swallowed
+      // and the event keeps running; here it propagates to
+      // SceneManager.catchException -> stop(), so one shoddy map script
+      // kills the whole engine. Wrap the Script command (command355, which
+      // eval()s the joined parameters) to log + skip instead of throwing.
+      // ----------------------------------------------------------------
+      if (typeof Game_Interpreter !== 'undefined' && !Game_Interpreter.prototype.__sonarTolerantScripts) {
+        Game_Interpreter.prototype.__sonarTolerantScripts = true;
+        const origCommand355 = Game_Interpreter.prototype.command355;
+        if (typeof origCommand355 === 'function') {
+          Game_Interpreter.prototype.command355 = function () {
+            try {
+              return origCommand355.apply(this, arguments);
+            } catch (e) {
+              const evId = this.eventId ? this.eventId() : '?';
+              const src = ((this._params && this._params.join('\n')) || '').slice(0, 300);
+              print("[interpreter] Script call FAILED but continuing " +
+                    "(event=" + evId + " index=" + this._index + "): " + e +
+                    "\n  script was:\n    " + src.split('\n').join('\n    '));
+              return true; // treat as handled; event continues at next command
+            }
+          };
+        }
+      }
+
+      // Profile RMMZ core functions that plugins monkey-patch
+      const wrapProto = function (ctor, name, label, argNames) {
+        const proto = ctor && ctor.prototype;
+        if (!proto || typeof proto[name] !== 'function' || proto[name].__tracyWrapped) return;
+        const original = proto[name];
+        const nativeObj = native;
+        proto[name] = function () {
+          nativeObj.tracyZoneStart(label);
+          try {
+            return original.apply(this, arguments);
+          } finally {
+            nativeObj.tracyZoneEnd();
+          }
+        };
+        proto[name].__tracyWrapped = true;
+      };
+
+      // Game_Map.update / Game_Player.update (hooked by UltraMode7, Tyruswoo)
+      if (typeof Game_Map !== 'undefined') wrapProto(Game_Map, 'update', 'Game_Map.update');
+      if (typeof Game_Player !== 'undefined') wrapProto(Game_Player, 'update', 'Game_Player.update');
+
+      // UltraMode7 internals called from its patched Tilemap.updateTransform
+      // (_addAllSpots = Mode7 tile repaint, _sortChildren = per-frame z sort).
+      if (typeof Tilemap !== 'undefined' && Tilemap.prototype) {
+        // Counter layer: if inner count exceeds the incremental wrapper's
+        // count, something calls a SAVED pre-shim reference directly.
+        const innerOrig = Tilemap.prototype._addAllSpots;
+        Tilemap.prototype._addAllSpots = function () {
+          globalThis.__incInner_ = (globalThis.__incInner_ || 0) + 1;
+          return innerOrig.apply(this, arguments);
+        };
+        wrapProto(Tilemap, '_addAllSpots', 'UltraMode7._addAllSpots');
+        wrapProto(Tilemap, '_sortChildren', 'UltraMode7._sortChildren');
+      }
+
+      // ------------------------------------------------------------------
+      // INCREMENTAL TILEMAP REPAINT (opt-in, SONAR_TILEMAP_INCREMENTAL=1)
+      //
+      // Stock RMMZ _addAllSpots clears BOTH layers and repaints every
+      // visible tile spot (~cols*rows*_readMapData calls + autotile math)
+      // every time the scroll origin moves one tile. Under QuickJS this
+      // measured 55ms/frame while scrolling.
+      //
+      // This shim reuses the previously painted element rects: shift them by
+      // the tile delta, drop rects that fell out of the (margin-expanded)
+      // viewport, and paint only the newly exposed rows/columns. Autotile
+      // shapes of surviving tiles stay valid because their neighbors did not
+      // change; only fresh strips compute neighbors anew.
+      //
+      // Full repaint still happens when: first frame, explicit refresh
+      // (_needsRepaint), autotile animation frame change (shapes may differ),
+      // or a jump larger than the whole viewport.
+      // ------------------------------------------------------------------
+      if (typeof Tilemap !== 'undefined' && Tilemap.prototype &&
+          native.getEnv && native.getEnv("SONAR_TILEMAP_INCREMENTAL") === "1" &&
+          !Tilemap.prototype.__tracyIncremental) {
+        Tilemap.prototype.__tracyIncremental = true;
+        print("[inc] INCREMENTAL SHIM INSTALLED ok");
+        const nativeObj = native;
+        const origAddAllSpots = Tilemap.prototype._addAllSpots;
+
+        // Snapshot/restore helpers. Each slot holds one animation frame's
+        // painted element arrays plus the scroll origin it was built for.
+        // Swapping slots on autotile frame changes replaces a full repaint
+        // with an array swap + incremental shift.
+        const takeSnapshot = function (tilemap) {
+          const layers = [];
+          for (const combined of [tilemap._lowerLayer, tilemap._upperLayer]) {
+            for (const layer of combined.children) {
+              layers.push(layer._elements.slice());
+            }
+          }
+          return { startX: 0, startY: 0, animFrame: -1, layers: layers };
+        };
+
+        Tilemap.prototype._addAllSpots = function (startX, startY) {
+          globalThis.__incOuter_ = (globalThis.__incOuter_ || 0) + 1;
+          if ((globalThis.__incOuter_ || 0) % 600 === 1) {
+            print("[inc] calls outer(incremental)=" + (globalThis.__incOuter_ || 0) +
+                  " inner(direct/saved-ref)=" + (globalThis.__incInner_ || 0));
+          }
+          const tw = this.tileWidth;
+          const th = this.tileHeight;
+          const widthWithMargin = this.width + this._margin * 2;
+          const heightWithMargin = this.height + this._margin * 2;
+          const cols = Math.ceil(widthWithMargin / tw) + 1;
+          const rows = Math.ceil(heightWithMargin / th) + 1;
+
+          // TF_LayeredMap compat: its _addAllSpots wrapper clears the
+          // per-row "_billboards" layers (where tiles that block ANY
+          // direction are painted, e.g. pass-all-except-bottom counters)
+          // and expects a FULL repaint to refill every row. Incremental
+          // repaints only refill the newly exposed strip, so those tiles
+          // vanished and re-anchored relative to the scrolling player
+          // ("floating tiles"). Opt out of incremental entirely for such
+          // tilemaps — correctness over speed here.
+          if (this._billboards && this._billboards.length) {
+            for (const combined of [this._lowerLayer, this._upperLayer]) {
+              for (const layer of combined.children) {
+                layer._elements = [];
+                layer._needsVertexUpdate = true;
+              }
+            }
+            origAddAllSpots.call(this, startX, startY);
+            this.__incSlots = null;
+            return;
+          }
+
+          if (this._needsRepaint) {
+            if (!globalThis.__incFullCount_) globalThis.__incFullCount_ = [0, 0];
+            globalThis.__incFullCount_[0]++;
+            if (globalThis.__incFullCount_[0] % 5 === 1) {
+              print("[inc] FULL REPAIR reason=_needsRepaint (count=" +
+                    globalThis.__incFullCount_[0] + ") frame=" + timestamp);
+            }
+            // Detach live arrays BEFORE repainting: Layer.clear() truncates
+            // this._elements in place, so without this we'd corrupt whichever
+            // animation-frame slot's arrays are currently attached.
+            for (const combined of [this._lowerLayer, this._upperLayer]) {
+              for (const layer of combined.children) {
+                layer._elements = [];
+                layer._needsVertexUpdate = true;
+              }
+            }
+            origAddAllSpots.call(this, startX, startY);
+            // Map content changed: every anim-frame snapshot is stale.
+            this.__incSlots = null;
+            return;
+          }
+
+          if (!this.__incSlots) this.__incSlots = [null, null, null];
+          const af = ((this.animationFrame % 3) + 3) % 3;
+          let slot = this.__incSlots[af];
+
+          const jumpTooBig = !slot ||
+            Math.abs(startX - slot.startX) >= cols ||
+            Math.abs(startY - slot.startY) >= rows;
+
+          if (jumpTooBig) {
+            if (!globalThis.__incFullCount_) globalThis.__incFullCount_ = [0, 0];
+            globalThis.__incFullCount_[1]++;
+            if (globalThis.__incFullCount_[1] % 5 === 1 || !slot) {
+              print("[inc] FULL REPAIR reason=" + (!slot ? "new-anim-slot" : "camera-jump") +
+                    " af=" + af + " start=" + startX + "," + startY +
+                    " slotStart=" + (slot && slot.startX) + "," + (slot && slot.startY) +
+                    " (count=" + globalThis.__incFullCount_[1] + ") frame=" + timestamp);
+            }
+            // Same aliasing hazard as above: detach before clear+repaint so
+            // other slots' snapshots survive intact.
+            for (const combined of [this._lowerLayer, this._upperLayer]) {
+              for (const layer of combined.children) {
+                layer._elements = [];
+                layer._needsVertexUpdate = true;
+              }
+            }
+            origAddAllSpots.call(this, startX, startY);
+            if (!slot) slot = this.__incSlots[af] = takeSnapshot(this);
+            slot.startX = startX;
+            slot.startY = startY;
+            return;
+          }
+
+          const ddx = startX - slot.startX;
+          const ddy = startY - slot.startY;
+          const offx = ddx * tw;
+          const offy = ddy * th;
+
+          // Diagnostics are opt-in (SONAR_TILEMAP_DEBUG=1): the shift line
+          // fires once per scroll delta and MISMATCH fires whenever the live
+          // elements array isn't the snapshot slot's array object. With
+          // multiple tilemaps / plugins that swap _elements between the 3
+          // autotile-frame slots this is benign (lengths still match), but it
+          // used to spam the console every frame.
+          const incDebug = nativeObj.getEnv && nativeObj.getEnv("SONAR_TILEMAP_DEBUG") === "1";
+          if (incDebug && (!Tilemap.__incDebug || Tilemap.__incDebug !== ddx + "," + ddy)) {
+            Tilemap.__incDebug = ddx + "," + ddy;
+            print("[inc] shift d=" + ddx + "," + ddy +
+                  " start=" + startX + "," + startY +
+                  " cols=" + cols + " rows=" + rows +
+                  " tw=" + tw + " th=" + th +
+                  " w+m=" + widthWithMargin + " h+m=" + heightWithMargin);
+          }
+
+          // Shift retained rects and cull ones now fully outside.
+          let li = 0;
+          for (const combined of [this._lowerLayer, this._upperLayer]) {
+            for (const layer of combined.children) {
+              const el = slot.layers[li++];
+              if (incDebug && layer._elements !== el) {
+                print("[inc] MISMATCH: live elements are NOT slot[" + af + "] layer[" + (li - 1) + "]! " +
+                      "live=" + (layer._elements && layer._elements.length) +
+                      " slot=" + (el && el.length) +
+                      " ctor=" + (layer.constructor && layer.constructor.name));
+              }
+              layer._elements = el;
+              let w2 = 0;
+              for (let i = 0; i < el.length; i++) {
+                const e = el[i];
+                const ndx = e[3] - offx;
+                const ndy = e[4] - offy;
+                if (ndx + e[5] <= 0 || ndy + e[6] <= 0 || ndx >= widthWithMargin || ndy >= heightWithMargin) continue;
+                e[3] = ndx;
+                e[4] = ndy;
+                el[w2++] = e;
+              }
+              el.length = w2;
+              layer._needsVertexUpdate = true;
+            }
+          }
+
+          // Paint only cells that were not covered by the previous viewport.
+          for (let y = 0; y < rows; y++) {
+            const my = startY + y;
+            const rowCached = my >= slot.startY && my < slot.startY + rows;
+            for (let x = 0; x < cols; x++) {
+              const mx = startX + x;
+              if (rowCached && mx >= slot.startX && mx < slot.startX + cols) continue;
+              this._addSpot(startX, startY, x, y);
+            }
+          }
+
+          slot.startX = startX;
+          slot.startY = startY;
+          if (nativeObj.tracyZoneText) nativeObj.tracyZoneText("incremental d=" + ddx + "," + ddy);
+        };
+      }
+
+      // Tilemap.updateTransform - DETAILED VERSION. We do NOT duplicate the
+      // original's work; instead we lazily wrap each child display object's
+      // own updateTransform (per-instance, guarded) so the original call
+      // still drives everything exactly once, with a zone per child.
+      if (typeof Tilemap !== 'undefined' && !Tilemap.__tracyDetailedChildWrap) {
+        Tilemap.__tracyDetailedChildWrap = true;
+        const nativeObj = native;
+        const origTT = Tilemap.prototype.updateTransform;
+        if (!origTT.__tracyWrapped) {
+          Tilemap.prototype.updateTransform = function () {
+            nativeObj.tracyZoneStart("Tilemap.updateTransform");
+            try {
+              const kids = this.children;
+              if (!Tilemap.__tracyDumpedKids) {
+                Tilemap.__tracyDumpedKids = true;
+                let names = [];
+                for (let k = 0; k < kids.length; k++) {
+                  const c = kids[k];
+                  names.push(k + ":" + (c.constructor && c.constructor.name || "?") +
+                    " ownTT=" + Object.prototype.hasOwnProperty.call(c, 'updateTransform') +
+                    " protoTT=" + (c.constructor && c.constructor.prototype && c.constructor.prototype.hasOwnProperty('updateTransform')));
+                }
+                print("[shims.js] Tilemap ctor=" + (this.constructor && this.constructor.name) +
+                      " kids=[" + names.join(", ") + "]" +
+                      " Tilemap.Layer=" + typeof Tilemap.Layer +
+                      " LayerProtoOwnTT=" + (Tilemap.Layer && Tilemap.Layer.prototype ? Tilemap.Layer.prototype.hasOwnProperty('updateTransform') : "n/a"));
+                print("[shims.js] Tilemap.prototype.updateTransform source:\n" + String(origTT).slice(0, 800));
+              }
+              for (let i = 0; i < kids.length; i++) {
+                const c = kids[i];
+                const m = c && c.updateTransform;
+                if (typeof m === 'function' && !m.__tracyChildWrapped) {
+                  const orig = m;
+                  const label = "Tilemap child[" + i + "] " + (c.constructor && c.constructor.name || "obj");
+                  const wrapped = function () {
+                    nativeObj.tracyZoneStart(label);
+                    try {
+                      return orig.apply(this, arguments);
+                    } finally {
+                      nativeObj.tracyZoneEnd();
+                    }
+                  };
+                  wrapped.__tracyChildWrapped = true;
+                  c.updateTransform = wrapped;
+                }
+              }
+              // Zone the ORIGINAL call specifically: if a plugin re-patched
+              // Tilemap.updateTransform on top of ours, its work shows up
+              // here instead of as unattributed self time.
+              nativeObj.tracyZoneStart("Tilemap ORIGINAL updateTransform");
+              try {
+                return origTT.apply(this, arguments);
+              } finally {
+                nativeObj.tracyZoneEnd();
+              }
+            } finally {
+              nativeObj.tracyZoneEnd();
+            }
+          };
+          Tilemap.prototype.updateTransform.__tracyWrapped = true;
+        }
+      }
+
+      // Profile Tilemap.Layer.updateTransform (lower vs upper layer) so we
+      // know WHICH layer's per-tile math is expensive. NOTE: Layer inherits
+      // updateTransform from PIXI.Container, so we must resolve it through
+      // the prototype chain and install a shadowing wrapper.
+      if (typeof Tilemap !== 'undefined' && Tilemap.Layer && Tilemap.Layer.prototype &&
+          !Tilemap.Layer.prototype.hasOwnProperty('updateTransform')) {
+        const layerTT = PIXI.Container.prototype.updateTransform;
+        if (typeof layerTT === 'function') {
+          const nativeObj = native;
+          Tilemap.Layer.prototype.updateTransform = function () {
+            let which = "?";
+            if (this.parent && this === this.parent._lowerLayer) which = "LOWER";
+            else if (this.parent && this === this.parent._upperLayer) which = "UPPER";
+            else if (this.layerIndex !== undefined) which = "idx" + this.layerIndex;
+            nativeObj.tracyZoneStart("Tilemap.Layer[" + which + "] updateTransform");
+            try {
+              return layerTT.apply(this, arguments);
+            } finally {
+              nativeObj.tracyZoneEnd();
+            }
+          };
+        }
+      }
+
+      // Emit map dimensions into the Tilemap.updateTransform zone text so
+      // huge-map issues are visible directly in Tracy.
+      if (typeof Tilemap !== 'undefined' && !Tilemap.__tracyMapSizeText && typeof globalThis.$gameMap !== 'undefined' && globalThis.$gameMap && native.tracyZoneText) {
+        Tilemap.__tracyMapSizeText = true;
+        print("[shims.js] Map size: " + globalThis.$gameMap.width() + "x" + globalThis.$gameMap.height() +
+              " tiles, display " + globalThis.$gameMap.displayX().toFixed(2) + "," + globalThis.$gameMap.displayY().toFixed(2));
+      }
+
+      // Game_Character.update (hooked by ShoraLighting, Tyruswoo)
+      if (typeof Game_Character !== 'undefined') wrapProto(Game_Character, 'update', 'Game_Character.update');
+
+      // Sprite_Character.update (hooked by UltraMode7)
+      if (typeof Sprite_Character !== 'undefined') wrapProto(Sprite_Character, 'update', 'Sprite_Character.update');
+
+      // Spriteset_Map.update (hooked by ShoraLighting)
+      if (typeof Spriteset_Map !== 'undefined') wrapProto(Spriteset_Map, 'update', 'Spriteset_Map.update');
+
+      // ----------------------------------------------------------------
+      // CC_FontTexture diagnostic: verify the tinted-atlas composite.
+      // colored() tints via multiply + destination-in on a 2D canvas; if
+      // either op misbehaves in the shim the whole atlas stays opaque and
+      // every glyph gets a solid color box behind it. A correct atlas is
+      // mostly transparent, so report the opaque-pixel ratio + corner pixel
+      // (corner should be alpha 0) once per generated bitmap.
+      // ----------------------------------------------------------------
+      if (!globalThis.__sonarCCFontDebug && typeof CC !== "undefined" &&
+          CC.FontTexture && typeof CC.FontTexture.colored === "function" &&
+          typeof Bitmap !== "undefined") {
+        globalThis.__sonarCCFontDebug = true;
+        const origColored = CC.FontTexture.colored;
+        CC.FontTexture.colored = function (font, color) {
+          const b = origColored.apply(this, arguments);
+          if (b && b.canvas && !b.__sonarDumped) {
+            b.__sonarDumped = true;
+            try {
+              const ctx2d = b.context;
+              const w = b.width, h = b.height;
+              const d = ctx2d.getImageData(0, 0, w, h).data;
+              let opaque = 0, total = w * h;
+              for (let i = 3; i < d.length; i += 4) if (d[i] === 255) opaque++;
+              print("[CC_FontTexture] atlas " + font + " color=" + color +
+                    " " + w + "x" + h +
+                    " opaqueRatio=" + (opaque / total).toFixed(3) +
+                    " corner=[" + d[0] + "," + d[1] + "," + d[2] + "," + d[3] + "]");
+            } catch (e) {
+              print("[CC_FontTexture] diag error: " + e);
+            }
+          }
+          return b;
+        };
+
+        print("[shims.js] CC_FontTexture diagnostic installed");
+      }
+
+      if (typeof SceneManager !== 'undefined' && typeof PIXI !== 'undefined' && typeof Scene_Base !== 'undefined') {
+        rmmzPatched = true;
+        print("[shims.js] RMMZ/PixiJS Tracy profiling hooks installed." +
+              " incremental=" + (Tilemap && Tilemap.prototype.__tracyIncremental ? "ON" : "OFF") +
+              " env=" + JSON.stringify(native.getEnv ? native.getEnv("SONAR_TILEMAP_INCREMENTAL") : null));
+      }
+    };
+  }
 
   // ----------------------------------------------------------------
   // Events
@@ -690,7 +1201,41 @@
   Canvas2DContextShim.prototype._blendPixel = function (data, x, y, r, g, b, a) {
     const W = this._canvas.width;
     const idx = (y * W + x) * 4;
-    if (a <= 0) return;
+    const op = this.globalCompositeOperation;
+    // NOTE: a zero-alpha source pixel must NOT early-return for
+    // "destination-in" — erasing the dest (k = sA * dA = 0) IS its job.
+    // CC_FontTexture's atlas masking depends on it.
+    if (a <= 0 && op !== "destination-in") return;
+
+    // "multiply": co = aS*aB*B(Cb,Cs) + aS*(1-aB)*Cs + aB*(1-aS)*Cb,
+    //              ao = aS + aB*(1-aS). Opaque source replaces like normal;
+    //              over transparent dest regions the source shows through,
+    //              and overlapping region is componentwise multiplied.
+    if (op === "multiply") {
+      const sA = a / 255, dA = data[idx + 3] / 255;
+      const oA = sA + dA * (1 - sA);
+      if (oA <= 0) { data[idx] = data[idx+1] = data[idx+2] = data[idx+3] = 0; return; }
+      const sR = r / 255, sG = g / 255, sB = b / 255;
+      const dR = data[idx] / 255, dG = data[idx + 1] / 255, dB = data[idx + 2] / 255;
+      const mix = function (cs, cb) { return sA * dA * cs * cb + sA * (1 - dA) * cs + dA * (1 - sA) * cb; };
+      data[idx]     = Math.round(mix(sR, dR) / oA * 255);
+      data[idx + 1] = Math.round(mix(sG, dG) / oA * 255);
+      data[idx + 2] = Math.round(mix(sB, dB) / oA * 255);
+      data[idx + 3] = Math.round(oA * 255);
+      return;
+    }
+
+    // "destination-in": keep dest only where the source has alpha,
+    // scaled by the source alpha. Everything else becomes transparent.
+    if (op === "destination-in") {
+      const k = (a / 255) * (data[idx + 3] / 255);
+      data[idx]     = Math.round(data[idx]     * k);
+      data[idx + 1] = Math.round(data[idx + 1] * k);
+      data[idx + 2] = Math.round(data[idx + 2] * k);
+      data[idx + 3] = Math.round(k * 255);
+      return;
+    }
+
     const sa = a / 255, dA = data[idx + 3] / 255;
     const oa = sa + dA * (1 - sa);
     if (oa <= 0) { data[idx] = r; data[idx+1] = g; data[idx+2] = b; data[idx+3] = a; return; }
@@ -743,11 +1288,16 @@
         return;
       }
 
+      // CC_FontTexture compat: with "destination-in", a ZERO-alpha source
+      // pixel must still erase the destination (k = sA * dA = 0). Skipping
+      // sa==0 pixels here left the opaque color from the plugin's "multiply"
+      // fillRect pass unmasked, rendering a solid colored box behind every
+      // glyph drawn from its tinted atlas.
       for (let row = sy0; row < sy1; row++) {
         for (let col = sx0; col < sx1; col++) {
           const sidx = (row * sw + col) * 4;
           const sa = Math.round(srcData[sidx + 3] * alpha);
-          if (sa > 0) {
+          if (sa > 0 || this.globalCompositeOperation === "destination-in") {
             this._blendPixel(destBuf, dx + col, dy + row, srcData[sidx], srcData[sidx + 1], srcData[sidx + 2], sa);
           }
         }
@@ -773,7 +1323,7 @@
         const sj = (ux * sw) | 0;
         const sidx = (si * sw + sj) * 4;
         const sa = srcData[sidx + 3];
-        if (!sa) continue;
+        if (!sa && this.globalCompositeOperation !== "destination-in") continue;
         this._blendPixel(destBuf, xx, yy, srcData[sidx], srcData[sidx + 1], srcData[sidx + 2], Math.round(sa * alpha));
       }
     }
@@ -800,7 +1350,7 @@
 
       const fillW = x1 - x0;
       const dst32 = new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2);
-      if (ca >= 255) {
+      if (ca >= 255 && this.globalCompositeOperation === "source-over") {
         const pixel32 = (255 << 24) | (c.b << 16) | (c.g << 8) | c.r;
         for (let yy = y0; yy < y1; yy++) {
           const rowStart = yy * W + x0;
@@ -1262,23 +1812,37 @@ CanvasElementShim.prototype.getContext = function (type) {
       this._src = value;
       this.complete = false;
       const self = this;
+      // Decode EAGERLY + synchronously so width/_pixelData are valid the
+      // moment `img.src = ...` returns. Web/NW.js code assumes image
+      // metadata is synchronously available; deferring a microtask produces
+      // zero-size bitmaps at use time (text-atlas bakes cache garbage).
+      // Only the `load` EVENT stays async, as onload-waiting code expects.
+      const info = native.decodeImage(safePath(value));
+      if (info) {
+        self.width = info.width;
+        self.height = info.height;
+        self._pixelData = info.data;
+        self.complete = true;
+      } else {
+        // CC_FontTexture compat: a failed decode previously left width=0 and
+        // NO _pixelData, so every drawImage of this image silently no-oped.
+        // The plugin's multiply fillRect then tinted an empty canvas,
+        // producing the solid color box behind every glyph. Log it loudly
+        // and keep going.
+        print("[Shim] IMAGE DECODE FAILED: " + safePath(value) +
+              " (drawImage of this image will be a no-op)");
+        self.complete = true;
+      }
       Promise.resolve().then(function () {
-        const path = safePath(self._src);
-        const info = native.decodeImage(path);
-        if (info) {
-          self.width = info.width;
-          self.height = info.height;
-          self._pixelData = info.data;
-          self.complete = true;
-          const evt = new EventShim("load");
-          self.dispatchEvent(evt);
-          if (self.onload) self.onload(evt);
-        } else {
-          self.complete = true;
+        if (!self._pixelData) {
           const evt = new EventShim("error");
           self.dispatchEvent(evt);
           if (self.onerror) self.onerror(evt);
+          return;
         }
+        const evt = new EventShim("load");
+        self.dispatchEvent(evt);
+        if (self.onload) self.onload(evt);
       });
     },
   });
