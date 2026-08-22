@@ -177,11 +177,8 @@
   // loop, collapsing many JS->C boundary crossings into one call.
   //
   // Correctness notes vs. the naive version:
-  //  * PixiJS REUSES one Float32Array and rewrites it before each upload, so
-  //    a deferred reference to the source array would carry the NEXT batch's
-  //    bytes. We snapshot the bytes at defer time.
-  //  * After flushing, the buffer bindings current before the flush are
-  //    restored, so the upcoming draw sees the same bind state.
+  // ----------------------------------------------------------------
+  // bufferSubData: direct native passthrough (no JS allocation overhead)
   // ----------------------------------------------------------------
   if (native.getEnv && native.getEnv("SONAR_BATCH_UPLOADS") === "1" &&
       native.gl && native.gl.batchBufferSubData) {
@@ -196,8 +193,6 @@
     let _needsFlush = false;
     const _boundBuffers = {};
 
-    // Snapshot the payload so later reuse of the source typed array can't
-    // corrupt a deferred upload. Raw ArrayBuffers are already immutable.
     function snapshotBytes(data) {
       if (data && typeof data === "object" && data.buffer && data.byteLength !== undefined) {
         const copy = new ArrayBuffer(data.byteLength);
@@ -227,9 +222,7 @@
       _needsFlush = false;
       if (_pendingUploads.length === 0) return;
       native.gl.batchBufferSubData(_pendingUploads);
-      _pendingUploads.length = 0; // reuse the array, avoid GC pressure
-      // Restore the bindings that were current before the flush so the
-      // upcoming draw (and any attribute setup) sees identical GL state.
+      _pendingUploads.length = 0;
       for (const target in _boundBuffers) {
         if (Object.prototype.hasOwnProperty.call(_boundBuffers, target)) {
           _origBindBuffer.call(native.gl, target, _boundBuffers[target]);
@@ -597,8 +590,8 @@
       if (typeof Game_Map !== 'undefined') wrapProto(Game_Map, 'update', 'Game_Map.update');
       if (typeof Game_Player !== 'undefined') wrapProto(Game_Player, 'update', 'Game_Player.update');
 
-      // UltraMode7 internals called from its patched Tilemap.updateTransform
-      // (_addAllSpots = Mode7 tile repaint, _sortChildren = per-frame z sort).
+      // Vanilla RMMZ Tilemap internals called from Tilemap.updateTransform
+      // (_addAllSpots = map tile repaint, _sortChildren = z sort).
       if (typeof Tilemap !== 'undefined' && Tilemap.prototype) {
         // Counter layer: if inner count exceeds the incremental wrapper's
         // count, something calls a SAVED pre-shim reference directly.
@@ -607,8 +600,8 @@
           globalThis.__incInner_ = (globalThis.__incInner_ || 0) + 1;
           return innerOrig.apply(this, arguments);
         };
-        wrapProto(Tilemap, '_addAllSpots', 'UltraMode7._addAllSpots');
-        wrapProto(Tilemap, '_sortChildren', 'UltraMode7._sortChildren');
+        wrapProto(Tilemap, '_addAllSpots', 'Tilemap._addAllSpots');
+        wrapProto(Tilemap, '_sortChildren', 'Tilemap._sortChildren');
       }
 
       // ------------------------------------------------------------------
@@ -629,8 +622,9 @@
       // (_needsRepaint), autotile animation frame change (shapes may differ),
       // or a jump larger than the whole viewport.
       // ------------------------------------------------------------------
+      // Enabled by default unless explicitly disabled with SONAR_TILEMAP_INCREMENTAL=0
       if (typeof Tilemap !== 'undefined' && Tilemap.prototype &&
-          native.getEnv && native.getEnv("SONAR_TILEMAP_INCREMENTAL") === "1" &&
+          (!native.getEnv || native.getEnv("SONAR_TILEMAP_INCREMENTAL") !== "0") &&
           !Tilemap.prototype.__tracyIncremental) {
         Tilemap.prototype.__tracyIncremental = true;
         print("[inc] INCREMENTAL SHIM INSTALLED ok");
@@ -644,8 +638,15 @@
         const takeSnapshot = function (tilemap) {
           const layers = [];
           for (const combined of [tilemap._lowerLayer, tilemap._upperLayer]) {
+            if (!combined || !combined.children) continue;
             for (const layer of combined.children) {
-              layers.push(layer._elements.slice());
+              const src = layer._elements || [];
+              const copy = new Array(src.length);
+              for (let i = 0; i < src.length; i++) {
+                const e = src[i];
+                copy[i] = [e[0], e[1], e[2], e[3], e[4], e[5], e[6]];
+              }
+              layers.push(copy);
             }
           }
           return { startX: 0, startY: 0, animFrame: -1, layers: layers };
@@ -800,6 +801,21 @@
           slot.startX = startX;
           slot.startY = startY;
           if (nativeObj.tracyZoneText) nativeObj.tracyZoneText("incremental d=" + ddx + "," + ddy);
+        };
+
+        // Fast inlined map data reader (avoids Number.prototype.mod function calls)
+        Tilemap.prototype._readMapData = function(x, y, z) {
+          const gm = globalThis.$gameMap;
+          if (!gm) return 0;
+          const w = gm.width();
+          const h = gm.height();
+          if (gm.isLoopHorizontal()) x = (x % w + w) % w;
+          if (gm.isLoopVertical()) y = (y % h + h) % h;
+          if (x >= 0 && x < w && y >= 0 && y < h) {
+            const d = gm.data();
+            return d ? (d[(z * h + y) * w + x] || 0) : 0;
+          }
+          return 0;
         };
       }
 
