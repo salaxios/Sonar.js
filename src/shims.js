@@ -2030,9 +2030,13 @@ CanvasElementShim.prototype.getContext = function (type) {
     if (!m) return src;
     return src.slice(0, i) + src.slice(i + m[0].length);
   }
+  globalThis.__evaluatedUrls__ = globalThis.__evaluatedUrls__ || {};
   function loadAndEvalScript(scriptElem) {
     if (!scriptElem || !scriptElem.src || scriptElem._executed) return;
     scriptElem._executed = true;
+    var _urlKey = scriptElem.src;
+    if (globalThis.__evaluatedUrls__[_urlKey]) return;
+    globalThis.__evaluatedUrls__[_urlKey] = true;
     const url = safePath(scriptElem.src);
     // WASM-wrapped libraries are inert by design here: effekseer.min.js and
     // vorbisdecoder.js are Emscripten modules whose bootstrap runs the WebAssembly

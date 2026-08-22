@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 #ifdef _WIN32
     #include <direct.h>
 #else
@@ -20,6 +21,16 @@
 
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
+
+#ifdef PLAYBACK_LEFT
+#undef PLAYBACK_LEFT
+#endif
+#ifdef PLAYBACK_RIGHT
+#undef PLAYBACK_RIGHT
+#endif
+#define STB_VORBIS_NO_INTEGER_CONVERSION
+#define STB_VORBIS_IMPLEMENTATION
+#include "stb_vorbis.c"
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
@@ -462,33 +473,24 @@ static JSValue js_native_audio_play(JSContext *ctx, JSValueConst this_val,
 
     ma_result res = ma_sound_init_from_file(&g_audio_engine, path, 0, NULL, NULL, &g_audio_sounds[slot]);
     if (res != MA_SUCCESS) {
-        fprintf(stderr, "[audioPlay] failed to load: %s (err %d)\n", path, res);
+        fprintf(stderr, "[audioPlay] FAILED: '%s' err=%d\n", path, res);
         g_audio_sound_inuse[slot] = 0;
         return JS_NewInt32(ctx, -1);
     }
 
-    // Optional args: volume, looping, pitch, pan
-    if (argc >= 2) {
-        double vol = 1.0;
-        JS_ToFloat64(ctx, &vol, argv[1]);
-        ma_sound_set_volume(&g_audio_sounds[slot], (float)vol);
-    }
-    if (argc >= 3) {
-        int loop = JS_ToBool(ctx, argv[2]);
-        ma_sound_set_looping(&g_audio_sounds[slot], loop ? MA_TRUE : MA_FALSE);
-    }
-    if (argc >= 4) {
-        double pitch = 1.0;
-        JS_ToFloat64(ctx, &pitch, argv[3]);
-        ma_sound_set_pitch(&g_audio_sounds[slot], (float)pitch);
-    }
-    if (argc >= 5) {
-        double pan = 0.0;
-        JS_ToFloat64(ctx, &pan, argv[4]);
-        ma_sound_set_pan(&g_audio_sounds[slot], (float)pan);
-    }
+    double vol = 1.0, pitch = 1.0, pan = 0.0;
+    int loop = 0;
+    if (argc >= 2) JS_ToFloat64(ctx, &vol, argv[1]);
+    if (argc >= 3) loop = JS_ToBool(ctx, argv[2]);
+    if (argc >= 4) JS_ToFloat64(ctx, &pitch, argv[3]);
+    if (argc >= 5) JS_ToFloat64(ctx, &pan, argv[4]);
 
+    ma_sound_set_volume(&g_audio_sounds[slot], (float)vol);
+    ma_sound_set_looping(&g_audio_sounds[slot], loop ? MA_TRUE : MA_FALSE);
+    ma_sound_set_pitch(&g_audio_sounds[slot], (float)pitch);
+    ma_sound_set_pan(&g_audio_sounds[slot], (float)pan);
     ma_sound_start(&g_audio_sounds[slot]);
+
     return JS_NewInt32(ctx, slot);
 }
 
@@ -1250,7 +1252,7 @@ int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -1286,20 +1288,19 @@ int main(int argc, char *argv[]) {
 
     /* Init audio engine on the main thread (full stack) before JS runs.
        ma_engine_init needs more stack than QuickJS callbacks provide. */
-    fprintf(stderr, "[DEBUG] Skipping audio engine init for testing\n");
-    /*{
-        ma_engine_config config = ma_engine_config_init();
-        config.noDevice = MA_FALSE;
-        ma_result res = ma_engine_init(&config, &g_audio_engine);
+    {
+        ma_engine_config ecfg = ma_engine_config_init();
+        ma_result res = ma_engine_init(&ecfg, &g_audio_engine);
         if (res == MA_SUCCESS) {
             g_audio_sounds = (ma_sound *)calloc(AUDIO_MAX_SOUNDS, sizeof(ma_sound));
             memset(g_audio_sound_inuse, 0, sizeof(g_audio_sound_inuse));
+            ma_engine_set_volume(&g_audio_engine, 1.0f);
             g_audio_initialized = 1;
-            fprintf(stderr, "miniaudio engine initialized OK\n");
+            fprintf(stderr, "miniaudio engine initialized OK (master vol=1.0)\n");
         } else {
             fprintf(stderr, "miniaudio engine init failed (err %d), audio disabled\n", res);
         }
-    }*/
+    }
 
     g_engine.rt = JS_NewRuntime();
     g_engine.ctx = JS_NewContext(g_engine.rt);
@@ -1313,7 +1314,6 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     SDL_free(shim_path);
-    fprintf(stderr, "[DEBUG] shims.js loaded OK\n");
 
     //load actual game files here
     // eval_file(g_engine.ctx, "game/js/rmmz_core.js");
@@ -1322,24 +1322,16 @@ int main(int argc, char *argv[]) {
 	// Change working directory so data/, img/, js/ paths resolve correctly
 	#ifdef _WIN32
 		#include <direct.h>
-		fprintf(stderr, "[DEBUG] chdir to Project1...\n");
 		_chdir("Project1");
-		fprintf(stderr, "[DEBUG] chdir OK\n");
 	#else
 		#include <unistd.h>
 		chdir("Project1");
 	#endif
 
 // --- LOAD RMMZ LIBRARIES (must be before engine files) ---
-fprintf(stderr, "[DEBUG] Loading pixi.js...\n");
 eval_file(g_engine.ctx, "js/libs/pixi.js");
-fprintf(stderr, "[DEBUG] pixi.js OK\n");
-fprintf(stderr, "[DEBUG] Loading pako.min.js...\n");
 eval_file(g_engine.ctx, "js/libs/pako.min.js");
-fprintf(stderr, "[DEBUG] pako OK\n");
-fprintf(stderr, "[DEBUG] Loading localforage.min.js...\n");
 eval_file(g_engine.ctx, "js/libs/localforage.min.js");
-fprintf(stderr, "[DEBUG] localforage OK\n");
 // vorbisdecoder.js intentionally NOT loaded: it's a real Emscripten-compiled
 // WASM module, and our globalThis.WebAssembly in shims.js is a JS-only stub
 // that never executes actual wasm bytecode (Instance() just sets
@@ -1350,31 +1342,33 @@ fprintf(stderr, "[DEBUG] localforage OK\n");
 // eval_file(g_engine.ctx, "js/libs/vorbisdecoder.js");
 
 // --- LOAD RMMZ ENGINE IN ORDER ---
-fprintf(stderr, "[DEBUG] Loading rmmz_core.js...\n");
 eval_file(g_engine.ctx, "js/rmmz_core.js");
-fprintf(stderr, "[DEBUG] rmmz_core OK\n");
-fprintf(stderr, "[DEBUG] Loading rmmz_managers.js...\n");
 eval_file(g_engine.ctx, "js/rmmz_managers.js");
-fprintf(stderr, "[DEBUG] rmmz_managers OK\n");
-
-// Load audio shims after AudioManager is defined
-/*{
-    fprintf(stderr, "[DEBUG] Loading audio_shims.js...\n");
-    char *audio_shim_path = path_next_to_executable("audio_shims.js");
-    if (audio_shim_path) {
-        if (eval_file(g_engine.ctx, audio_shim_path) != 0) {
-            fprintf(stderr, "Warning: Failed to load audio_shims.js\n");
-        }
-        SDL_free(audio_shim_path);
-    }
-}*/
-fprintf(stderr, "[DEBUG] Skipping audio_shims.js for testing\n");
-
 eval_file(g_engine.ctx, "js/rmmz_objects.js");
 eval_file(g_engine.ctx, "js/rmmz_scenes.js");
 eval_file(g_engine.ctx, "js/rmmz_sprites.js");
 eval_file(g_engine.ctx, "js/rmmz_windows.js");
 eval_file(g_engine.ctx, "js/plugins.js");
+
+// Load audio shims AFTER all engine files + plugins to prevent overwrites
+eval_file(g_engine.ctx, "../audio_shims.js");
+
+// Tell shims.js loadAndEvalScript to skip engine files already loaded via eval_file.
+// Without this, main.js's loadMainScripts() re-evaluates them through the DOM shim,
+// overwriting our audio overrides (and everything else set after engine files loaded).
+{
+    const char *mark =
+        "globalThis.__evaluatedUrls__=globalThis.__evaluatedUrls__||{};"
+        "var _urls=["
+        "'js/libs/pixi.js','js/libs/pako.min.js','js/libs/localforage.min.js',"
+        "'js/rmmz_core.js','js/rmmz_managers.js','js/rmmz_objects.js',"
+        "'js/rmmz_scenes.js','js/rmmz_sprites.js','js/rmmz_windows.js',"
+        "'js/plugins.js'"
+        "];"
+        "for(var i=0;i<_urls.length;i++)globalThis.__evaluatedUrls__[_urls[i]]=true;";
+    JS_Eval(g_engine.ctx, mark, strlen(mark), "<mark-evaluated>", JS_EVAL_TYPE_GLOBAL);
+}
+
 eval_file(g_engine.ctx, "js/main.js");
 
 	fprintf(stderr, "Game files loaded. Entering main loop...\n");

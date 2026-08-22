@@ -4,19 +4,16 @@
 // bypassing the WebAudio API shim entirely.
 (function () {
     "use strict";
-    print("[audio_shims] starting...");
-    if (typeof native === "undefined" || !native.audioPlay) {
+    var native = globalThis.__native__;
+    if (!native || !native.audioPlay) {
         print("[audio_shims] native audio API not available, skipping");
         return;
     }
-    print("[audio_shims] native API found");
     if (typeof AudioManager === "undefined") {
         print("[audio_shims] AudioManager not defined yet, skipping");
         return;
     }
-    print("[audio_shims] AudioManager found, calling audioInit...");
     native.audioInit();
-    print("[audio_shims] audioInit returned OK");
     var _bgmHandle = -1;
     var _bgsHandle = -1;
     var _meHandle = -1;
@@ -42,7 +39,6 @@
     function stopHandle(h) {
         if (h >= 0) { native.audioStop(h); native.audioUninit(h); }
     }
-    print("[audio_shims] Installing BGM overrides...");
     AudioManager.playBgm = function (bgm, pos) {
         if (this.isCurrentBgm(bgm)) {
             this.updateBgmParameters(bgm);
