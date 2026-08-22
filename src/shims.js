@@ -172,83 +172,9 @@
   const tracyOn = !!(native.tracyEnabled && native.tracyEnabled());
 
   // ----------------------------------------------------------------
-  // ACCUMULATOR OPTIMIZATION (opt-in, SONAR_BATCH_UPLOADS=1): batch
-  // bufferSubData uploads and flush them once per draw in a single C-side
-  // loop, collapsing many JS->C boundary crossings into one call.
-  //
-  // Correctness notes vs. the naive version:
-  // ----------------------------------------------------------------
   // bufferSubData: direct native passthrough (no JS allocation overhead)
+  // SONAR_BATCH_UPLOADS optimization disabled due to visual issues
   // ----------------------------------------------------------------
-  if (native.getEnv && native.getEnv("SONAR_BATCH_UPLOADS") === "1" &&
-      native.gl && native.gl.batchBufferSubData) {
-    const _origBindBuffer = native.gl.bindBuffer;
-    const _origBufferSubData = native.gl.bufferSubData;
-    const _origDrawElements = native.gl.drawElements;
-    const _origDrawArrays = native.gl.drawArrays;
-    const _origDrawElementsInstanced = native.gl.drawElementsInstanced;
-    const _origDrawArraysInstanced = native.gl.drawArraysInstanced;
-
-    const _pendingUploads = [];
-    let _needsFlush = false;
-    const _boundBuffers = {};
-
-    function snapshotBytes(data) {
-      if (data && typeof data === "object" && data.buffer && data.byteLength !== undefined) {
-        const copy = new ArrayBuffer(data.byteLength);
-        new Uint8Array(copy).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
-        return copy;
-      }
-      return data;
-    }
-
-    native.gl.bindBuffer = function (target, buffer) {
-      _boundBuffers[target] = buffer;
-      return _origBindBuffer.call(this, target, buffer);
-    };
-
-    native.gl.bufferSubData = function (target, offset, data) {
-      _pendingUploads.push({
-        target: target,
-        offset: offset,
-        data: snapshotBytes(data),
-        buffer: _boundBuffers[target] || 0
-      });
-      _needsFlush = true;
-    };
-
-    function flushPendingUploads() {
-      if (!_needsFlush) return;
-      _needsFlush = false;
-      if (_pendingUploads.length === 0) return;
-      native.gl.batchBufferSubData(_pendingUploads);
-      _pendingUploads.length = 0;
-      for (const target in _boundBuffers) {
-        if (Object.prototype.hasOwnProperty.call(_boundBuffers, target)) {
-          _origBindBuffer.call(native.gl, target, _boundBuffers[target]);
-        }
-      }
-    }
-    native.gl.flushPendingUploads = flushPendingUploads;
-
-    native.gl.drawElements = function (mode, count, type, offset) {
-      flushPendingUploads();
-      return _origDrawElements.call(this, mode, count, type, offset);
-    };
-    native.gl.drawArrays = function (mode, first, count) {
-      flushPendingUploads();
-      return _origDrawArrays.call(this, mode, first, count);
-    };
-    native.gl.drawElementsInstanced = function (mode, count, type, offset, primcount) {
-      flushPendingUploads();
-      return _origDrawElementsInstanced.call(this, mode, count, type, offset, primcount);
-    };
-    native.gl.drawArraysInstanced = function (mode, first, count, primcount) {
-      flushPendingUploads();
-      return _origDrawArraysInstanced.call(this, mode, first, count, primcount);
-    };
-    print("[Shim] bufferSubData accumulator enabled (SONAR_BATCH_UPLOADS=1)");
-  }
 
   // ----------------------------------------------------------------
   // WebGL detection globals — confirmed required by tracing pixi.js:
@@ -395,6 +321,12 @@
   };
   globalThis.__tick__ = function (timestamp) {
     globalThis.__currentTimestamp = timestamp;
+    
+    // Reset bufferSubData statistics at frame start
+    if (native.gl && native.gl.resetBufferSubDataStats) {
+      native.gl.resetBufferSubDataStats();
+    }
+    
     // GC pressure watch — OPT-IN (SONAR_GC_WATCH=1). Disabled by default:
     // JS_ComputeMemoryUsage walks the whole heap and costs real ms.
     if (globalThis.__gcWatch_ === undefined) {
@@ -454,26 +386,47 @@
     // Profile rAF callbacks
     const frameCbs = rafCallbacks;
     rafCallbacks = [];
-    if (tracyOn) native.tracyZoneStart("RAF callbacks");
+
+    // Label caching ALWAYS happens (prevents GC pressure regardless of Tracy status)
     for (let i = 0; i < frameCbs.length; i++) {
-      // Label built ONCE per callback and cached — building it here every
-      // frame allocated thousands of throwaway strings/sec, driving periodic
-      // major GC cycles (the ~50ms spikes every couple of seconds).
       const entry = frameCbs[i];
       let label = entry.__label;
       if (label === undefined) {
         label = entry.__label = "rAF " + (entry.cb.name || "anon");
       }
-      native.tracyZoneStart(label);
+    }
+
+    if (tracyOn) native.tracyZoneStart("RAF callbacks");
+    for (let i = 0; i < frameCbs.length; i++) {
+      const entry = frameCbs[i];
+      const label = entry.__label;
+      if (tracyOn) {
+        native.tracyZoneStart(label);
+      }
       try {
         entry.cb(timestamp);
       } catch (e) {
         print("[rAF error] " + e + "\n  e.stack=[" + (e && e.stack ? e.stack : "(none)") + "]");
       } finally {
-        native.tracyZoneEnd();
+        if (tracyOn) {
+          native.tracyZoneEnd();
+        }
       }
     }
     if (tracyOn) native.tracyZoneEnd();
+
+    // Report bufferSubData statistics every frame for optimization analysis
+    if (native.gl && native.gl.getBufferSubDataStats) {
+      globalThis.__bufferStatFrame_ = (globalThis.__bufferStatFrame_ || 0) + 1;
+      const stats = native.gl.getBufferSubDataStats();
+      if (stats.calls > 0) { // Only report when there are actual calls
+        print("[bufferSubData] frame=" + globalThis.__bufferStatFrame_ + 
+              " calls=" + stats.calls + 
+              " bytes=" + Math.round(stats.bytes / 1024) + "KB" +
+              " ARRAY_BUFFER=" + stats.arrayBufferCalls +
+              " ELEMENT_ARRAY_BUFFER=" + stats.elementArrayBufferCalls);
+      }
+    }
 
     if (tracyOn) native.tracyZoneEnd();
   };
@@ -673,9 +626,11 @@
         Tilemap.prototype._addAllSpots = function (startX, startY) {
           const timestamp = globalThis.__currentTimestamp || (typeof Graphics !== 'undefined' && Graphics.frameCount ? Graphics.frameCount : 0);
           globalThis.__incOuter_ = (globalThis.__incOuter_ || 0) + 1;
-          if ((globalThis.__incOuter_ || 0) % 600 === 1) {
-            print("[inc] calls outer(incremental)=" + (globalThis.__incOuter_ || 0) +
-                  " inner(direct/saved-ref)=" + (globalThis.__incInner_ || 0));
+          
+          if ((globalThis.__incOuter_ || 0) % 30 === 1) {
+            print("[inc] outer=" + (globalThis.__incOuter_ || 0) +
+                  " inner=" + (globalThis.__incInner_ || 0) +
+                  " frame=" + timestamp);
           }
           const tw = this.tileWidth;
           const th = this.tileHeight;
@@ -684,14 +639,13 @@
           const cols = Math.ceil(widthWithMargin / tw) + 1;
           const rows = Math.ceil(heightWithMargin / th) + 1;
 
+          if (!globalThis.__incFullReasons_) globalThis.__incFullReasons_ = {};
+
           if (this._needsRepaint) {
-            if (!globalThis.__incFullCount_) globalThis.__incFullCount_ = [0, 0];
-            globalThis.__incFullCount_[0]++;
-            if (globalThis.__incFullCount_[0] % 5 === 1) {
-              print("[inc] FULL REPAIR reason=_needsRepaint (count=" +
-                    globalThis.__incFullCount_[0] + ") frame=" + timestamp);
+            globalThis.__incFullReasons_._needsRepaint = (globalThis.__incFullReasons_._needsRepaint || 0) + 1;
+            if (globalThis.__incFullReasons_._needsRepaint % 5 === 1) {
+              print("[inc] FULL REPAINT: _needsRepaint (count=" + globalThis.__incFullReasons_._needsRepaint + ")");
             }
-            // Detach live arrays BEFORE repainting
             for (const combined of [this._lowerLayer, this._upperLayer]) {
               if (combined && combined.children) {
                 for (const layer of combined.children) {
@@ -718,50 +672,37 @@
           const af = ((this.animationFrame % 3) + 3) % 3;
           let slot = this.__incSlots[af];
 
-          // Fast slot reuse if animation frame changed while stationary
           if (slot && slot.startX === startX && slot.startY === startY) {
+            if ((globalThis.__incOuter_ || 0) % 30 === 1) {
+              print("[inc] FAST SLOT REUSE: frame=" + timestamp);
+            }
             restoreSlot(this, slot);
             return;
           }
 
-          // TF_LayeredMap compat: billboards are indexed per-row. For maps with
-          // billboards, run full fast repaint whenever scroll position changes
-          // and cache into slot[af].
           const hasBillboards = (this._billboards && this._billboards.length > 0);
           if (hasBillboards) {
-            for (const combined of [this._lowerLayer, this._upperLayer]) {
-              if (combined && combined.children) {
-                for (const layer of combined.children) {
-                  layer._elements = [];
-                  layer._needsVertexUpdate = true;
-                }
-              }
+            globalThis.__incFullReasons_._billboardsSkipped = (globalThis.__incFullReasons_._billboardsSkipped || 0) + 1;
+            if (globalThis.__incFullReasons_._billboardsSkipped % 30 === 1) {
+              print("[inc] SKIPPING billboard full repaint (count=" + globalThis.__incFullReasons_._billboardsSkipped + ")");
             }
-            for (let b = 0; b < this._billboards.length; b++) {
-              if (this._billboards[b]) {
-                this._billboards[b]._elements = [];
-                this._billboards[b]._needsVertexUpdate = true;
-              }
-            }
-            origAddAllSpots.call(this, startX, startY);
-            slot = this.__incSlots[af] = takeSnapshot(this);
-            slot.startX = startX;
-            slot.startY = startY;
-            return;
           }
 
+          // More aggressive incremental: allow up to 2x viewport movement before full repaint
           const jumpTooBig = !slot ||
-            Math.abs(startX - slot.startX) >= cols ||
-            Math.abs(startY - slot.startY) >= rows;
+            Math.abs(startX - slot.startX) >= cols * 2 ||
+            Math.abs(startY - slot.startY) >= rows * 2;
 
           if (jumpTooBig) {
-            if (!globalThis.__incFullCount_) globalThis.__incFullCount_ = [0, 0];
-            globalThis.__incFullCount_[1]++;
-            if (globalThis.__incFullCount_[1] % 5 === 1 || !slot) {
-              print("[inc] FULL REPAIR reason=" + (!slot ? "new-anim-slot" : "camera-jump") +
-                    " af=" + af + " start=" + startX + "," + startY +
+            const reason = !slot ? "new-anim-slot" : "camera-jump";
+            globalThis.__incFullReasons_[reason] = (globalThis.__incFullReasons_[reason] || 0) + 1;
+            if (globalThis.__incFullReasons_[reason] % 5 === 1 || !slot) {
+              print("[inc] FULL REPAINT: " + reason + " af=" + af + 
+                    " start=" + startX + "," + startY +
                     " slotStart=" + (slot && slot.startX) + "," + (slot && slot.startY) +
-                    " (count=" + globalThis.__incFullCount_[1] + ") frame=" + timestamp);
+                    " cols=" + cols + " rows=" + rows +
+                    " threshold=" + (cols * 2) + "x" + (rows * 2) +
+                    " (count=" + globalThis.__incFullReasons_[reason] + ")");
             }
             // Same aliasing hazard as above: detach before clear+repaint so
             // other slots' snapshots survive intact.
@@ -778,33 +719,21 @@
             return;
           }
 
+          // INCREMENTAL PATH
+          if ((globalThis.__incOuter_ || 0) % 30 === 1) {
+            print("[inc] INCREMENTAL UPDATE: d=" + (startX - slot.startX) + "," + (startY - slot.startY) +
+                  " frame=" + timestamp);
+          }
+
           const ddx = startX - slot.startX;
           const ddy = startY - slot.startY;
           const offx = ddx * tw;
           const offy = ddy * th;
 
-          // Diagnostics are opt-in (SONAR_TILEMAP_DEBUG=1)
-          const incDebug = nativeObj.getEnv && nativeObj.getEnv("SONAR_TILEMAP_DEBUG") === "1";
-          if (incDebug && (!Tilemap.__incDebug || Tilemap.__incDebug !== ddx + "," + ddy)) {
-            Tilemap.__incDebug = ddx + "," + ddy;
-            print("[inc] shift d=" + ddx + "," + ddy +
-                  " start=" + startX + "," + startY +
-                  " cols=" + cols + " rows=" + rows +
-                  " tw=" + tw + " th=" + th +
-                  " w+m=" + widthWithMargin + " h+m=" + heightWithMargin);
-          }
-
-          // Shift retained rects and cull ones now fully outside.
           let li = 0;
           for (const combined of [this._lowerLayer, this._upperLayer]) {
             for (const layer of combined.children) {
               const el = slot.layers[li++];
-              if (incDebug && layer._elements !== el) {
-                print("[inc] MISMATCH: live elements are NOT slot[" + af + "] layer[" + (li - 1) + "]! " +
-                      "live=" + (layer._elements && layer._elements.length) +
-                      " slot=" + (el && el.length) +
-                      " ctor=" + (layer.constructor && layer.constructor.name));
-              }
               layer._elements = el;
               let w2 = 0;
               for (let i = 0; i < el.length; i++) {
@@ -834,6 +763,11 @@
 
           slot.startX = startX;
           slot.startY = startY;
+          
+          if ((globalThis.__incOuter_ || 0) % 300 === 1 && globalThis.__incFullReasons_) {
+            print("[inc] STATISTICS: outer=" + (globalThis.__incOuter_ || 0) +
+                  " fullReasons=" + JSON.stringify(globalThis.__incFullReasons_));
+          }
           if (nativeObj.tracyZoneText) nativeObj.tracyZoneText("incremental d=" + ddx + "," + ddy);
         };
 
@@ -916,6 +850,17 @@
         }
       }
 
+      // Periodic summary of full vs incremental repaint ratio
+      if ((globalThis.__incOuter_ || 0) % 300 === 1 && globalThis.__incFullReasons_) {
+        let totalFull = 0;
+        for (const key in globalThis.__incFullReasons_) {
+          totalFull += globalThis.__incFullReasons_[key];
+        }
+        const incrementalCount = (globalThis.__incOuter_ || 0) - totalFull;
+        const ratio = totalFull > 0 ? (incrementalCount / totalFull).toFixed(2) : "N/A";
+        print("[inc] RATIO: incremental=" + incrementalCount + " full=" + totalFull + " ratio=" + ratio);
+      }
+
       // Profile Tilemap.Layer.updateTransform (lower vs upper layer) so we
       // know WHICH layer's per-tile math is expensive. NOTE: Layer inherits
       // updateTransform from PIXI.Container, so we must resolve it through
@@ -925,14 +870,43 @@
         const layerTT = PIXI.Container.prototype.updateTransform;
         if (typeof layerTT === 'function') {
           const nativeObj = native;
+          
+          if (!globalThis.__layerStats_) {
+            globalThis.__layerStats_ = {
+              LOWER: { calls: 0, totalTime: 0 },
+              UPPER: { calls: 0, totalTime: 0 },
+              other: { calls: 0, totalTime: 0 }
+            };
+          }
+          
           Tilemap.Layer.prototype.updateTransform = function () {
             let which = "?";
-            if (this.parent && this === this.parent._lowerLayer) which = "LOWER";
-            else if (this.parent && this === this.parent._upperLayer) which = "UPPER";
-            else if (this.layerIndex !== undefined) which = "idx" + this.layerIndex;
+            if (this.parent) {
+              if (this.parent._lowerLayer && this.parent._lowerLayer.children && this.parent._lowerLayer.children.includes(this)) {
+                which = "LOWER";
+              } else if (this.parent._upperLayer && this.parent._upperLayer.children && this.parent._upperLayer.children.includes(this)) {
+                which = "UPPER";
+              } else if (typeof this.layerIndex !== 'undefined') {
+                which = "idx" + this.layerIndex;
+              }
+            }
+            
+            const startTime = nativeObj.now();
             nativeObj.tracyZoneStart("Tilemap.Layer[" + which + "] updateTransform");
             try {
-              return layerTT.apply(this, arguments);
+              const result = layerTT.apply(this, arguments);
+              const elapsed = nativeObj.now() - startTime;
+              
+              const stats = globalThis.__layerStats_[which] || globalThis.__layerStats_.other;
+              stats.calls++;
+              stats.totalTime += elapsed;
+              
+              if (stats.calls % 300 === 1) {
+                print("[Layer] " + which + " calls=" + stats.calls + 
+                      " avgTime=" + (stats.totalTime / stats.calls).toFixed(3) + "ms");
+              }
+              
+              return result;
             } finally {
               nativeObj.tracyZoneEnd();
             }

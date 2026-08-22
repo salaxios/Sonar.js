@@ -245,6 +245,12 @@ static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueCo
     TracyCZoneEnd(zone);
     return JS_UNDEFINED;
 }
+// Per-frame profiling for bufferSubData to identify call patterns
+static int g_frame_buffer_subdata_calls = 0;
+static size_t g_frame_buffer_subdata_bytes = 0;
+static int g_frame_array_buffer_calls = 0;
+static int g_frame_element_array_buffer_calls = 0;
+
 static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
     TracyCZoneN(zone, "gl.bufferSubData", g_tracy_enabled);
@@ -252,8 +258,39 @@ static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValu
     GLintptr offset = (GLintptr)arg_int(ctx, argv[1]);
     size_t len = 0;
     uint8_t *data = arg_typed_array(ctx, argv[2], &len);
+    
+    // Track call statistics
+    g_frame_buffer_subdata_calls++;
+    g_frame_buffer_subdata_bytes += len;
+    if (target == GL_ARRAY_BUFFER) {
+        g_frame_array_buffer_calls++;
+    } else if (target == GL_ELEMENT_ARRAY_BUFFER) {
+        g_frame_element_array_buffer_calls++;
+    }
+    
     glBufferSubData(target, offset, (GLsizeiptr)len, data);
     TracyCZoneEnd(zone);
+    return JS_UNDEFINED;
+}
+
+// Function to get bufferSubData statistics for the current frame
+static JSValue js_getBufferSubDataStats(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t; (void)argc; (void)argv;
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "calls", JS_NewInt32(ctx, g_frame_buffer_subdata_calls));
+    JS_SetPropertyStr(ctx, obj, "bytes", JS_NewInt64(ctx, (int64_t)g_frame_buffer_subdata_bytes));
+    JS_SetPropertyStr(ctx, obj, "arrayBufferCalls", JS_NewInt32(ctx, g_frame_array_buffer_calls));
+    JS_SetPropertyStr(ctx, obj, "elementArrayBufferCalls", JS_NewInt32(ctx, g_frame_element_array_buffer_calls));
+    return obj;
+}
+
+// Function to reset bufferSubData statistics (call once per frame)
+static JSValue js_resetBufferSubDataStats(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t; (void)argc; (void)argv;
+    g_frame_buffer_subdata_calls = 0;
+    g_frame_buffer_subdata_bytes = 0;
+    g_frame_array_buffer_calls = 0;
+    g_frame_element_array_buffer_calls = 0;
     return JS_UNDEFINED;
 }
 
@@ -1102,4 +1139,5 @@ void register_gl_bridge(JSContext *ctx, JSValueConst gl_obj) {
     REG(gl_obj, uniformMatrix2fv); REG(gl_obj, uniformMatrix3fv); REG(gl_obj, uniformMatrix4fv);
     REG(gl_obj, useProgram); REG(gl_obj, vertexAttribDivisor); REG(gl_obj, vertexAttribPointer);
     REG(gl_obj, viewport);
+    REG(gl_obj, getBufferSubDataStats); REG(gl_obj, resetBufferSubDataStats);
 }
