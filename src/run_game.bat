@@ -6,7 +6,7 @@ set SONAR_TILEMAP_INCREMENTAL=1
 
 
 :: Enable Tracy profiling zones (set to 1 to profile with Tracy GUI, or 0 for max speed)
-set SONAR_TRACY=0
+set SONAR_TRACY=1
 
 :: Optional: Debug log for tilemap shifts (set to 1 only if you want console spam)
 set SONAR_TILEMAP_DEBUG=0

@@ -425,18 +425,243 @@ static JSValue js_native_rasterize_text(JSContext *ctx, JSValueConst this_val,
     return result;
 }
 
+// --- Audio handle pool (max 32 concurrent sounds) ---
+#define AUDIO_MAX_SOUNDS 32
+static ma_sound *g_audio_sounds = NULL;
+static int g_audio_sound_inuse[AUDIO_MAX_SOUNDS] = {0};
+
+static int audio_alloc_slot(void) {
+    for (int i = 0; i < AUDIO_MAX_SOUNDS; i++) {
+        if (!g_audio_sound_inuse[i]) {
+            g_audio_sound_inuse[i] = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
 static JSValue js_native_audio_init(JSContext *ctx, JSValueConst this_val,
                                      int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    if (!g_audio_initialized) {
-        ma_result res = ma_engine_init(NULL, &g_audio_engine);
-        if (res != MA_SUCCESS) {
-            fprintf(stderr, "audio_init failed\n");
-            return JS_NewBool(ctx, 0);
-        }
-        g_audio_initialized = 1;
+    return JS_NewBool(ctx, g_audio_initialized);
+}
+
+// native.audioPlay(filePath, volume, looping, pitch, pan) -> handle (int) or -1
+static JSValue js_native_audio_play(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1 || !g_audio_initialized) return JS_NewInt32(ctx, -1);
+    const char *raw_path = JS_ToCString(ctx, argv[0]);
+    if (!raw_path) return JS_NewInt32(ctx, -1);
+    char path[1024];
+    url_decode(path, raw_path, sizeof(path));
+    JS_FreeCString(ctx, raw_path);
+
+    int slot = audio_alloc_slot();
+    if (slot < 0) return JS_NewInt32(ctx, -1);
+
+    ma_result res = ma_sound_init_from_file(&g_audio_engine, path, 0, NULL, NULL, &g_audio_sounds[slot]);
+    if (res != MA_SUCCESS) {
+        fprintf(stderr, "[audioPlay] failed to load: %s (err %d)\n", path, res);
+        g_audio_sound_inuse[slot] = 0;
+        return JS_NewInt32(ctx, -1);
     }
-    return JS_NewBool(ctx, 1);
+
+    // Optional args: volume, looping, pitch, pan
+    if (argc >= 2) {
+        double vol = 1.0;
+        JS_ToFloat64(ctx, &vol, argv[1]);
+        ma_sound_set_volume(&g_audio_sounds[slot], (float)vol);
+    }
+    if (argc >= 3) {
+        int loop = JS_ToBool(ctx, argv[2]);
+        ma_sound_set_looping(&g_audio_sounds[slot], loop ? MA_TRUE : MA_FALSE);
+    }
+    if (argc >= 4) {
+        double pitch = 1.0;
+        JS_ToFloat64(ctx, &pitch, argv[3]);
+        ma_sound_set_pitch(&g_audio_sounds[slot], (float)pitch);
+    }
+    if (argc >= 5) {
+        double pan = 0.0;
+        JS_ToFloat64(ctx, &pan, argv[4]);
+        ma_sound_set_pan(&g_audio_sounds[slot], (float)pan);
+    }
+
+    ma_sound_start(&g_audio_sounds[slot]);
+    return JS_NewInt32(ctx, slot);
+}
+
+// native.audioStop(handle)
+static JSValue js_native_audio_stop(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    ma_sound_stop(&g_audio_sounds[handle]);
+    return JS_UNDEFINED;
+}
+
+// native.audioUninit(handle)
+static JSValue js_native_audio_uninit(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    ma_sound_uninit(&g_audio_sounds[handle]);
+    g_audio_sound_inuse[handle] = 0;
+    return JS_UNDEFINED;
+}
+
+// native.audioSetVolume(handle, volume)
+static JSValue js_native_audio_set_volume(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    double vol = 1.0;
+    JS_ToFloat64(ctx, &vol, argv[1]);
+    ma_sound_set_volume(&g_audio_sounds[handle], (float)vol);
+    return JS_UNDEFINED;
+}
+
+// native.audioSetLooping(handle, looping)
+static JSValue js_native_audio_set_looping(JSContext *ctx, JSValueConst this_val,
+                                            int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    int loop = JS_ToBool(ctx, argv[1]);
+    ma_sound_set_looping(&g_audio_sounds[handle], loop ? MA_TRUE : MA_FALSE);
+    return JS_UNDEFINED;
+}
+
+// native.audioSetPitch(handle, pitch)
+static JSValue js_native_audio_set_pitch(JSContext *ctx, JSValueConst this_val,
+                                          int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    double pitch = 1.0;
+    JS_ToFloat64(ctx, &pitch, argv[1]);
+    ma_sound_set_pitch(&g_audio_sounds[handle], (float)pitch);
+    return JS_UNDEFINED;
+}
+
+// native.audioSetPan(handle, pan)
+static JSValue js_native_audio_set_pan(JSContext *ctx, JSValueConst this_val,
+                                        int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    double pan = 0.0;
+    JS_ToFloat64(ctx, &pan, argv[1]);
+    ma_sound_set_pan(&g_audio_sounds[handle], (float)pan);
+    return JS_UNDEFINED;
+}
+
+// native.audioFade(handle, volStart, volEnd, durationMs)
+static JSValue js_native_audio_fade(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 4) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    double volStart = 0.0, volEnd = 0.0;
+    int durationMs = 0;
+    JS_ToFloat64(ctx, &volStart, argv[1]);
+    JS_ToFloat64(ctx, &volEnd, argv[2]);
+    JS_ToInt32(ctx, &durationMs, argv[3]);
+    ma_sound_set_fade_in_milliseconds(&g_audio_sounds[handle], (float)volStart, (float)volEnd, (ma_uint64)durationMs);
+    return JS_UNDEFINED;
+}
+
+// native.audioIsPlaying(handle) -> bool
+static JSValue js_native_audio_is_playing(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_FALSE;
+    return ma_sound_is_playing(&g_audio_sounds[handle]) ? JS_TRUE : JS_FALSE;
+}
+
+// native.audioGetLength(handle) -> seconds (float)
+static JSValue js_native_audio_get_length(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewFloat64(ctx, 0.0);
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_NewFloat64(ctx, 0.0);
+    float len = 0.0f;
+    ma_sound_get_length_in_seconds(&g_audio_sounds[handle], &len);
+    return JS_NewFloat64(ctx, (double)len);
+}
+
+// native.audioGetCursor(handle) -> seconds (float)
+static JSValue js_native_audio_get_cursor(JSContext *ctx, JSValueConst this_val,
+                                           int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_NewFloat64(ctx, 0.0);
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_NewFloat64(ctx, 0.0);
+    float cur = 0.0f;
+    ma_sound_get_cursor_in_seconds(&g_audio_sounds[handle], &cur);
+    return JS_NewFloat64(ctx, (double)cur);
+}
+
+// native.audioSeek(handle, seconds)
+static JSValue js_native_audio_seek(JSContext *ctx, JSValueConst this_val,
+                                     int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 2) return JS_UNDEFINED;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_UNDEFINED;
+    double seconds = 0.0;
+    JS_ToFloat64(ctx, &seconds, argv[1]);
+    ma_sound_seek_to_second(&g_audio_sounds[handle], (float)seconds);
+    return JS_UNDEFINED;
+}
+
+// native.audioAtEnd(handle) -> bool
+static JSValue js_native_audio_at_end(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 1) return JS_FALSE;
+    int handle = -1;
+    JS_ToInt32(ctx, &handle, argv[0]);
+    if (handle < 0 || handle >= AUDIO_MAX_SOUNDS || !g_audio_sound_inuse[handle]) return JS_FALSE;
+    return ma_sound_at_end(&g_audio_sounds[handle]) ? JS_TRUE : JS_FALSE;
+}
+
+// native.audioEngineVolume(volume) -> sets engine volume (0.0-1.0); no args = get current
+static JSValue js_native_audio_engine_volume(JSContext *ctx, JSValueConst this_val,
+                                              int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (!g_audio_initialized) return JS_NewFloat64(ctx, 0.0);
+    if (argc >= 1) {
+        double vol = 1.0;
+        JS_ToFloat64(ctx, &vol, argv[0]);
+        ma_engine_set_volume(&g_audio_engine, (float)vol);
+    }
+    return JS_NewFloat64(ctx, (double)ma_engine_get_volume(&g_audio_engine));
 }
 
 static JSValue js_native_now(JSContext *ctx, JSValueConst this_val,
@@ -851,6 +1076,34 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_measure_text, "measureText", 4));
     JS_SetPropertyStr(ctx, native, "audioInit",
                        JS_NewCFunction(ctx, js_native_audio_init, "audioInit", 0));
+    JS_SetPropertyStr(ctx, native, "audioPlay",
+                       JS_NewCFunction(ctx, js_native_audio_play, "audioPlay", 5));
+    JS_SetPropertyStr(ctx, native, "audioStop",
+                       JS_NewCFunction(ctx, js_native_audio_stop, "audioStop", 1));
+    JS_SetPropertyStr(ctx, native, "audioUninit",
+                       JS_NewCFunction(ctx, js_native_audio_uninit, "audioUninit", 1));
+    JS_SetPropertyStr(ctx, native, "audioSetVolume",
+                       JS_NewCFunction(ctx, js_native_audio_set_volume, "audioSetVolume", 2));
+    JS_SetPropertyStr(ctx, native, "audioSetLooping",
+                       JS_NewCFunction(ctx, js_native_audio_set_looping, "audioSetLooping", 2));
+    JS_SetPropertyStr(ctx, native, "audioSetPitch",
+                       JS_NewCFunction(ctx, js_native_audio_set_pitch, "audioSetPitch", 2));
+    JS_SetPropertyStr(ctx, native, "audioSetPan",
+                       JS_NewCFunction(ctx, js_native_audio_set_pan, "audioSetPan", 2));
+    JS_SetPropertyStr(ctx, native, "audioFade",
+                       JS_NewCFunction(ctx, js_native_audio_fade, "audioFade", 4));
+    JS_SetPropertyStr(ctx, native, "audioIsPlaying",
+                       JS_NewCFunction(ctx, js_native_audio_is_playing, "audioIsPlaying", 1));
+    JS_SetPropertyStr(ctx, native, "audioGetLength",
+                       JS_NewCFunction(ctx, js_native_audio_get_length, "audioGetLength", 1));
+    JS_SetPropertyStr(ctx, native, "audioGetCursor",
+                       JS_NewCFunction(ctx, js_native_audio_get_cursor, "audioGetCursor", 1));
+    JS_SetPropertyStr(ctx, native, "audioSeek",
+                       JS_NewCFunction(ctx, js_native_audio_seek, "audioSeek", 2));
+    JS_SetPropertyStr(ctx, native, "audioAtEnd",
+                       JS_NewCFunction(ctx, js_native_audio_at_end, "audioAtEnd", 1));
+    JS_SetPropertyStr(ctx, native, "audioEngineVolume",
+                       JS_NewCFunction(ctx, js_native_audio_engine_volume, "audioEngineVolume", 1));
     JS_SetPropertyStr(ctx, native, "now",
                        JS_NewCFunction(ctx, js_native_now, "now", 0));
     JS_SetPropertyStr(ctx, native, "setWindowSize",
@@ -1031,6 +1284,23 @@ int main(int argc, char *argv[]) {
     }
     fprintf(stderr, "GL: %s / %s\n", glGetString(GL_VERSION), glGetString(GL_RENDERER));
 
+    /* Init audio engine on the main thread (full stack) before JS runs.
+       ma_engine_init needs more stack than QuickJS callbacks provide. */
+    fprintf(stderr, "[DEBUG] Skipping audio engine init for testing\n");
+    /*{
+        ma_engine_config config = ma_engine_config_init();
+        config.noDevice = MA_FALSE;
+        ma_result res = ma_engine_init(&config, &g_audio_engine);
+        if (res == MA_SUCCESS) {
+            g_audio_sounds = (ma_sound *)calloc(AUDIO_MAX_SOUNDS, sizeof(ma_sound));
+            memset(g_audio_sound_inuse, 0, sizeof(g_audio_sound_inuse));
+            g_audio_initialized = 1;
+            fprintf(stderr, "miniaudio engine initialized OK\n");
+        } else {
+            fprintf(stderr, "miniaudio engine init failed (err %d), audio disabled\n", res);
+        }
+    }*/
+
     g_engine.rt = JS_NewRuntime();
     g_engine.ctx = JS_NewContext(g_engine.rt);
     JS_SetHostPromiseRejectionTracker(g_engine.rt, promise_rejection_tracker, NULL);
@@ -1043,6 +1313,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     SDL_free(shim_path);
+    fprintf(stderr, "[DEBUG] shims.js loaded OK\n");
 
     //load actual game files here
     // eval_file(g_engine.ctx, "game/js/rmmz_core.js");
@@ -1051,16 +1322,24 @@ int main(int argc, char *argv[]) {
 	// Change working directory so data/, img/, js/ paths resolve correctly
 	#ifdef _WIN32
 		#include <direct.h>
+		fprintf(stderr, "[DEBUG] chdir to Project1...\n");
 		_chdir("Project1");
+		fprintf(stderr, "[DEBUG] chdir OK\n");
 	#else
 		#include <unistd.h>
 		chdir("Project1");
 	#endif
 
 // --- LOAD RMMZ LIBRARIES (must be before engine files) ---
+fprintf(stderr, "[DEBUG] Loading pixi.js...\n");
 eval_file(g_engine.ctx, "js/libs/pixi.js");
+fprintf(stderr, "[DEBUG] pixi.js OK\n");
+fprintf(stderr, "[DEBUG] Loading pako.min.js...\n");
 eval_file(g_engine.ctx, "js/libs/pako.min.js");
+fprintf(stderr, "[DEBUG] pako OK\n");
+fprintf(stderr, "[DEBUG] Loading localforage.min.js...\n");
 eval_file(g_engine.ctx, "js/libs/localforage.min.js");
+fprintf(stderr, "[DEBUG] localforage OK\n");
 // vorbisdecoder.js intentionally NOT loaded: it's a real Emscripten-compiled
 // WASM module, and our globalThis.WebAssembly in shims.js is a JS-only stub
 // that never executes actual wasm bytecode (Instance() just sets
@@ -1071,8 +1350,26 @@ eval_file(g_engine.ctx, "js/libs/localforage.min.js");
 // eval_file(g_engine.ctx, "js/libs/vorbisdecoder.js");
 
 // --- LOAD RMMZ ENGINE IN ORDER ---
+fprintf(stderr, "[DEBUG] Loading rmmz_core.js...\n");
 eval_file(g_engine.ctx, "js/rmmz_core.js");
+fprintf(stderr, "[DEBUG] rmmz_core OK\n");
+fprintf(stderr, "[DEBUG] Loading rmmz_managers.js...\n");
 eval_file(g_engine.ctx, "js/rmmz_managers.js");
+fprintf(stderr, "[DEBUG] rmmz_managers OK\n");
+
+// Load audio shims after AudioManager is defined
+/*{
+    fprintf(stderr, "[DEBUG] Loading audio_shims.js...\n");
+    char *audio_shim_path = path_next_to_executable("audio_shims.js");
+    if (audio_shim_path) {
+        if (eval_file(g_engine.ctx, audio_shim_path) != 0) {
+            fprintf(stderr, "Warning: Failed to load audio_shims.js\n");
+        }
+        SDL_free(audio_shim_path);
+    }
+}*/
+fprintf(stderr, "[DEBUG] Skipping audio_shims.js for testing\n");
+
 eval_file(g_engine.ctx, "js/rmmz_objects.js");
 eval_file(g_engine.ctx, "js/rmmz_scenes.js");
 eval_file(g_engine.ctx, "js/rmmz_sprites.js");
