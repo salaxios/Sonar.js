@@ -394,6 +394,7 @@
     rafCallbacks = rafCallbacks.filter(function (e) { return e.id !== id; });
   };
   globalThis.__tick__ = function (timestamp) {
+    globalThis.__currentTimestamp = timestamp;
     // GC pressure watch — OPT-IN (SONAR_GC_WATCH=1). Disabled by default:
     // JS_ComputeMemoryUsage walks the whole heap and costs real ms.
     if (globalThis.__gcWatch_ === undefined) {
@@ -670,6 +671,7 @@
         };
 
         Tilemap.prototype._addAllSpots = function (startX, startY) {
+          const timestamp = globalThis.__currentTimestamp || (typeof Graphics !== 'undefined' && Graphics.frameCount ? Graphics.frameCount : 0);
           globalThis.__incOuter_ = (globalThis.__incOuter_ || 0) + 1;
           if ((globalThis.__incOuter_ || 0) % 600 === 1) {
             print("[inc] calls outer(incremental)=" + (globalThis.__incOuter_ || 0) +
