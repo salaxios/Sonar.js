@@ -172,6 +172,26 @@
   const tracyOn = !!(native.tracyEnabled && native.tracyEnabled());
 
   // ----------------------------------------------------------------
+  // Lightweight frame profiler — always-on counters that dump a breakdown
+  // when any frame exceeds SONAR_SLOW_FRAME_MS (default 100ms). This
+  // identifies exactly which operations dominate expensive frames (scene
+  // transitions, textbox opens) without needing to recompile with Tracy.
+  // ----------------------------------------------------------------
+  const _fp = {
+    decodeImageCount: 0, decodeImageTime: 0,
+    rasterizeTextCount: 0, rasterizeTextTime: 0,
+    measureTextCount: 0, measureTextTime: 0,
+    fillRectCount: 0,
+    drawImageCount: 0,
+    fillTextCount: 0,
+    canvasAllocCount: 0,
+    texUploadSkip: 0,
+    readFileCount: 0,
+    frameStart: 0,
+  };
+  const SLOW_FRAME_MS = parseInt(native.getEnv("SONAR_SLOW_FRAME_MS") || "100", 10);
+
+  // ----------------------------------------------------------------
   // bufferSubData: direct native passthrough (no JS allocation overhead)
   // SONAR_BATCH_UPLOADS optimization disabled due to visual issues
   // ----------------------------------------------------------------
@@ -403,6 +423,7 @@
       if (tracyOn) {
         native.tracyZoneStart(label);
       }
+      const _cbStart = performance.now();
       try {
         entry.cb(timestamp);
       } catch (e) {
@@ -411,21 +432,70 @@
         if (tracyOn) {
           native.tracyZoneEnd();
         }
+        const _cbMs = performance.now() - _cbStart;
+        if (_cbMs > SLOW_FRAME_MS) {
+          print("[SLOW CB " + _cbMs.toFixed(1) + "ms] " + label);
+        }
       }
     }
     if (tracyOn) native.tracyZoneEnd();
 
-    // Report bufferSubData statistics every frame for optimization analysis
+    // Report bufferSubData statistics every 60 frames (not every frame)
+    // to avoid stderr I/O overhead causing micro-stutters.
     if (native.gl && native.gl.getBufferSubDataStats) {
       globalThis.__bufferStatFrame_ = (globalThis.__bufferStatFrame_ || 0) + 1;
-      const stats = native.gl.getBufferSubDataStats();
-      if (stats.calls > 0) { // Only report when there are actual calls
-        print("[bufferSubData] frame=" + globalThis.__bufferStatFrame_ + 
-              " calls=" + stats.calls + 
-              " bytes=" + Math.round(stats.bytes / 1024) + "KB" +
-              " ARRAY_BUFFER=" + stats.arrayBufferCalls +
-              " ELEMENT_ARRAY_BUFFER=" + stats.elementArrayBufferCalls);
+      if (globalThis.__bufferStatFrame_ % 300 === 0) {
+        const stats = native.gl.getBufferSubDataStats();
+        if (stats.calls > 0 || stats.arrayBufferCalls > 0) {
+          print("[bufSub/60] calls=" + Math.round(stats.calls / 300) +
+                " AB=" + stats.arrayBufferCalls +
+                " EAB=" + stats.elementArrayBufferCalls);
+        }
+        native.gl.resetBufferSubDataStats();
       }
+    }
+
+    // Frame profiler — dump breakdown when a frame exceeds the threshold.
+    // This runs every frame but the comparison is nearly free; the print
+    // only fires on slow frames.
+    {
+      const frameEnd = performance.now();
+      const frameMs = _fp.frameStart ? (frameEnd - _fp.frameStart) : 0;
+      if (frameMs > SLOW_FRAME_MS) {
+        // Read GL-level counters from native (lightweight int reads)
+        let gl = "";
+        if (native.gl && native.gl.getCounters) {
+          const g = native.gl.getCounters();
+          gl = " glDraw=" + (g.drawArrays + g.drawElements + g.drawArraysInstanced + g.drawElementsInstanced) +
+               " texUp=" + (g.texImage2D + g.texSubImage2D) +
+               " texSkip=" + g.texSkip +
+               " bufData=" + g.bufferData + " bufSub=" + g.bufferSubData;
+        }
+        print("[SLOW FRAME " + frameMs.toFixed(1) + "ms]" +
+          " imgs=" + _fp.decodeImageCount + "(" + _fp.decodeImageTime.toFixed(0) + "ms)" +
+          " raster=" + _fp.rasterizeTextCount + "(" + _fp.rasterizeTextTime.toFixed(0) + "ms)" +
+          " measure=" + _fp.measureTextCount + "(" + _fp.measureTextTime.toFixed(0) + "ms)" +
+          " fillRect=" + _fp.fillRectCount + "(" + _fp.fillRectTime.toFixed(0) + "ms)" +
+          " drawImg=" + _fp.drawImageCount + "(" + _fp.drawImageTime.toFixed(0) + "ms)" +
+          " fillTxt=" + _fp.fillTextCount + "(" + _fp.fillTextTime.toFixed(0) + "ms)" +
+          " createEl=" + _fp.createElementCount + "(" + _fp.createElementTime.toFixed(0) + "ms)" +
+          " appendChild=" + _fp.appendChildCount + "(" + _fp.appendChildTime.toFixed(0) + "ms)" +
+          " readFile=" + _fp.readFileCount +
+          gl);
+      }
+      // Reset counters for next frame
+      _fp.decodeImageCount = 0; _fp.decodeImageTime = 0;
+      _fp.rasterizeTextCount = 0; _fp.rasterizeTextTime = 0;
+      _fp.measureTextCount = 0; _fp.measureTextTime = 0;
+      _fp.fillRectCount = 0; _fp.fillRectTime = 0;
+      _fp.drawImageCount = 0; _fp.drawImageTime = 0;
+      _fp.fillTextCount = 0; _fp.fillTextTime = 0;
+      _fp.createElementCount = 0; _fp.createElementTime = 0;
+      _fp.appendChildCount = 0; _fp.appendChildTime = 0;
+      _fp.readFileCount = 0;
+      _fp.texUploadSkip = 0;
+      if (native.gl && native.gl.resetCounters) native.gl.resetCounters();
+      _fp.frameStart = performance.now();
     }
 
     if (tracyOn) native.tracyZoneEnd();
@@ -662,7 +732,10 @@
                 }
               }
             }
+            const _t0 = performance.now();
             origAddAllSpots.call(this, startX, startY);
+            const _ms = performance.now() - _t0;
+            if (_ms > 5) print("[Tilemap] _addAllSpots full repaint " + _ms.toFixed(1) + "ms (" + cols + "x" + rows + "=" + (cols*rows) + " tiles)");
             // Map content changed: every anim-frame snapshot is stale.
             this.__incSlots = null;
             return;
@@ -1081,6 +1154,7 @@
     this._width = width || 0;
     this._height = height || 0;
     this.style = makeStyleObject();
+    this._dirty = true; // Start dirty so the first texImage2D always uploads
     this._allocPixels();
   }
   CanvasElementShim.prototype = Object.create(EventTargetShim.prototype);
@@ -1092,16 +1166,17 @@
     } else {
       this._pixelData = null;
     }
+    this._dirty = true;
   };
   // width/height as accessors so resizing the canvas reallocates its
   // backing buffer; _pixelData stays in sync with the reported dimensions.
   Object.defineProperty(CanvasElementShim.prototype, "width", {
     get: function () { return this._width; },
-    set: function (v) { this._width = v >>> 0; this._allocPixels(); },
+    set: function (v) { v = v >>> 0; if (v !== this._width) { this._width = v; this._allocPixels(); } },
   });
   Object.defineProperty(CanvasElementShim.prototype, "height", {
     get: function () { return this._height; },
-    set: function (v) { this._height = v >>> 0; this._allocPixels(); },
+    set: function (v) { v = v >>> 0; if (v !== this._height) { this._height = v; this._allocPixels(); } },
   });
 // ----------------------------------------------------------------
   // CanvasRenderingContext2D — a real software rasterizer that draws into
@@ -1211,6 +1286,12 @@
     return this._pixview;
   };
 
+  // Mark canvas dirty whenever a draw operation occurs, so texImage2D can
+  // skip re-uploading unchanged textures.
+  Canvas2DContextShim.prototype._markDirty = function () {
+    this._canvas._dirty = true;
+  };
+
   Canvas2DContextShim.prototype._apply = function (x, y) {
     const t = this._transform;
     return [t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f];
@@ -1289,7 +1370,26 @@
     const t = this._transform;
     const alpha = this.globalAlpha;
 
-    // FAST PATH: Identity or pure translation with 1:1 scale (e.g. Bitmap.snap, drawImage)
+    // C fast path: identity transform — source-over opaque is the common case.
+    if (t.a === 1 && t.b === 0 && t.c === 0 && t.d === 1) {
+      let compOp = 0;
+      if (this.globalCompositeOperation === "destination-in") compOp = 1;
+      else if (this.globalCompositeOperation === "multiply") compOp = 2;
+      __native__.blitPixels(
+        srcData.buffer || srcData, sw, sh,
+        this._canvas._pixelData, W, H,
+        0, 0, sw, sh,
+        Math.round(x + t.e), Math.round(y + t.f), dw, dh,
+        alpha, compOp
+      );
+      return;
+    }
+
+    // CC_FontTexture compat: with "destination-in", a ZERO-alpha source
+    // pixel must still erase the destination (k = sA * dA = 0). Skipping
+    // sa==0 pixels here left the opaque color from the plugin's "multiply"
+    // fillRect pass unmasked, rendering a solid colored box behind every
+    // glyph drawn from its tinted atlas.
     if (t.a === 1 && t.b === 0 && t.c === 0 && t.d === 1 && dw === sw && dh === sh) {
       const dx = Math.round(x + t.e);
       const dy = Math.round(y + t.f);
@@ -1312,11 +1412,6 @@
         return;
       }
 
-      // CC_FontTexture compat: with "destination-in", a ZERO-alpha source
-      // pixel must still erase the destination (k = sA * dA = 0). Skipping
-      // sa==0 pixels here left the opaque color from the plugin's "multiply"
-      // fillRect pass unmasked, rendering a solid colored box behind every
-      // glyph drawn from its tinted atlas.
       for (let row = sy0; row < sy1; row++) {
         for (let col = sx0; col < sx1; col++) {
           const sidx = (row * sw + col) * 4;
@@ -1330,6 +1425,35 @@
     }
 
     // GENERAL PATH: Scaled or rotated drawing
+    // FAST PATH: Identity transform + opaque source-over — nearest-neighbor
+    // scaling with Uint32Array pixel copy (no per-pixel blend overhead).
+    if (t.a === 1 && t.b === 0 && t.c === 0 && t.d === 1 &&
+        alpha >= 0.999 && this.globalCompositeOperation === "source-over") {
+      const dstX0 = Math.max(0, Math.floor(x + t.e));
+      const dstY0 = Math.max(0, Math.floor(y + t.f));
+      const dstX1 = Math.min(W, Math.ceil(x + t.e + dw));
+      const dstY1 = Math.min(H, Math.ceil(y + t.f + dh));
+      if (dstX0 < dstX1 && dstY0 < dstY1) {
+        const src32 = new Uint32Array(srcData.buffer, srcData.byteOffset, srcData.byteLength >> 2);
+        const dst32 = new Uint32Array(destBuf.buffer, destBuf.byteOffset, destBuf.byteLength >> 2);
+        const scaleInvX = sw / dw;
+        const scaleInvY = sh / dh;
+        for (let di = dstY0; di < dstY1; di++) {
+          const si = ((di - y - t.f) * scaleInvY) | 0;
+          if (si < 0 || si >= sh) continue;
+          const dRow = di * W;
+          const sRow = si * sw;
+          for (let dj = dstX0; dj < dstX1; dj++) {
+            const sj = ((dj - x - t.e) * scaleInvX) | 0;
+            if (sj >= 0 && sj < sw) {
+              dst32[dRow + dj] = src32[sRow + sj];
+            }
+          }
+        }
+        return;
+      }
+    }
+
     const inv = this._inverse();
     const minx = Math.max(0, Math.floor(x));
     const maxx = Math.min(W - 1, Math.ceil(x + dw));
@@ -1354,6 +1478,9 @@
   };
 
   Canvas2DContextShim.prototype.fillRect = function (x, y, w, h) {
+    const _fr0 = performance.now();
+    _fp.fillRectCount++;
+    try {
     if (w <= 0 || h <= 0) return;
     const t = this._transform;
     const data = this._pix();
@@ -1409,17 +1536,19 @@
         }
       }
     }
+    } finally { _fp.fillRectTime += performance.now() - _fr0; }
   };
   Canvas2DContextShim.prototype.strokeRect = function (x, y, w, h) { this.fillRect(x, y, w, h); };
   Canvas2DContextShim.prototype.clearRect = function (x, y, w, h) {
     const data = this._pix(), W = this._canvas.width, H = this._canvas.height;
     const x0 = Math.max(0, Math.floor(x)), y0 = Math.max(0, Math.floor(y));
-    const x1 = Math.min(W - 1, Math.ceil(x + w)), y1 = Math.min(H - 1, Math.ceil(y + h));
-    for (let yy = y0; yy <= y1; yy++) {
-      for (let xx = x0; xx <= x1; xx++) {
-        const idx = (yy * W + xx) * 4;
-        data[idx] = data[idx+1] = data[idx+2] = data[idx+3] = 0;
-      }
+    const x1 = Math.min(W, Math.ceil(x + w)), y1 = Math.min(H, Math.ceil(y + h));
+    if (x0 >= x1 || y0 >= y1) return;
+    const fillW = x1 - x0;
+    const dst32 = new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2);
+    for (let yy = y0; yy < y1; yy++) {
+      const rowStart = yy * W + x0;
+      dst32.fill(0, rowStart, rowStart + fillW);
     }
   };
 
@@ -1459,14 +1588,21 @@
   const _textMeasureCache = makeBoundedCache(4000);
 
   Canvas2DContextShim.prototype.fillText = function (text, x, y) {
+    const _ft0 = performance.now();
+    _fp.fillTextCount++;
+    try {
     const f = parseFont(this.font), c = parseColor(this.fillStyle);
     const key = String(text) + "\u0001" + f.family + "\u0001" + f.size + "\u0001" + f.bold + "\u0001" + c.r + "," + c.g + "," + c.b + "," + c.a;
     let bmp = _textRasterCache.get(key);
     if (bmp === undefined) {
+      const _ts = performance.now();
       bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+      _fp.rasterizeTextTime += performance.now() - _ts;
+      _fp.rasterizeTextCount++;
+      if (bmp && bmp.data) bmp._view = new Uint8ClampedArray(bmp.data);
       _textRasterCache.set(key, bmp);
     }
-    if (!bmp) return;
+    if (!bmp || !bmp._view) return;
     let px = x, py = y;
     if (this.textAlign === "center") px = x - bmp.width / 2;
     else if (this.textAlign === "right" || this.textAlign === "end") px = x - bmp.width;
@@ -1474,7 +1610,8 @@
     else if (this.textBaseline === "middle") py = y - bmp.height / 2;
     else if (this.textBaseline === "bottom" || this.textBaseline === "ideographic") py = y - bmp.height;
     else py = y - bmp.ascent; // alphabetic
-    this._blit(new Uint8ClampedArray(bmp.data), bmp.width, bmp.height, px, py, bmp.width, bmp.height);
+    this._blit(bmp._view, bmp.width, bmp.height, px, py, bmp.width, bmp.height);
+    } finally { _fp.fillTextTime += performance.now() - _ft0; }
   };
   Canvas2DContextShim.prototype.strokeText = function (text, x, y) {
     const f = parseFont(this.font);
@@ -1484,9 +1621,10 @@
     let bmp = _textRasterCache.get(key);
     if (bmp === undefined) {
       bmp = native.rasterizeText(String(text), f.family, f.size, f.bold, c.r, c.g, c.b, c.a);
+      if (bmp && bmp.data) bmp._view = new Uint8ClampedArray(bmp.data);
       _textRasterCache.set(key, bmp);
     }
-    if (!bmp) return;
+    if (!bmp || !bmp._view) return;
     let px = x, py = y;
     if (this.textAlign === "center") px = x - bmp.width / 2;
     else if (this.textAlign === "right" || this.textAlign === "end") px = x - bmp.width;
@@ -1494,7 +1632,7 @@
     else if (this.textBaseline === "middle") py = y - bmp.height / 2;
     else if (this.textBaseline === "bottom" || this.textBaseline === "ideographic") py = y - bmp.height;
     else py = y - bmp.ascent;
-    const src = new Uint8ClampedArray(bmp.data);
+    const src = bmp._view;
     for (let dy = -lw; dy <= lw; dy++) {
       for (let dx = -lw; dx <= lw; dx++) {
         if (dx !== 0 || dy !== 0) {
@@ -1508,38 +1646,69 @@
     const key = String(text) + "\u0001" + f.family + "\u0001" + f.size + "\u0001" + f.bold;
     let w = _textMeasureCache.get(key);
     if (w === undefined) {
-      // Lightweight width-only native call — does NOT rasterize glyph
-      // bitmaps (see native.measureText in main.c). Previously this called
-      // native.rasterizeText, which fully rendered every glyph just to
-      // read bmp.width off the result and discard the pixels.
+      const _ts = performance.now();
       const m = native.measureText(String(text), f.family, f.size, f.bold);
+      _fp.measureTextTime += performance.now() - _ts;
+      _fp.measureTextCount++;
       w = m ? m.width : 0;
       _textMeasureCache.set(key, w);
     }
     return { width: w };
   };
 
+  // Reusable crop buffer for drawImage 9-arg path — avoids allocating a new
+  // Uint8ClampedArray on every font-atlas glyph draw (called many times/frame).
+  let _cropBuf = null;
+  let _cropBufSize = 0;
   Canvas2DContextShim.prototype.drawImage = function (img) {
+    const _dt0 = performance.now();
+    _fp.drawImageCount++;
+    try {
     if (!img || !img._pixelData) return;
     const iw = img.width || 0, ih = img.height || 0;
     if (!iw || !ih) return;
-    const fullSrc = new Uint8ClampedArray(img._pixelData);
-    const args = Array.prototype.slice.call(arguments, 1);
 
-    if (args.length >= 8) {
-      // 9-arg cropped form: drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh)
-      // Crop the requested source rect out of the full image buffer into a
-      // tightly-packed buffer, then hand that off to the existing _blit
-      // (which only knows how to blit a whole buffer starting at 0,0).
-      // Without this, the crop was silently ignored and the entire source
-      // image (e.g. a full font atlas) got stamped into every glyph cell.
-      const sx = args[0] | 0, sy = args[1] | 0, sw = args[2] | 0, sh = args[3] | 0;
-      const dx = args[4], dy = args[5], dw = args[6], dh = args[7];
+    const t = this._transform;
+    const isIdentity = t.a === 1 && t.b === 0 && t.c === 0 && t.d === 1;
+
+    // C fast path: identity transform only — handles crop, scale, blend in one call.
+    if (isIdentity) {
+      let sx, sy, sw, sh, dx, dy, dw, dh;
+      if (arguments.length >= 9) {
+        sx = arguments[1] | 0; sy = arguments[2] | 0;
+        sw = arguments[3] | 0; sh = arguments[4] | 0;
+        dx = arguments[5]; dy = arguments[6]; dw = arguments[7]; dh = arguments[8];
+      } else if (arguments.length >= 5) {
+        sx = 0; sy = 0; sw = iw; sh = ih;
+        dx = arguments[1]; dy = arguments[2]; dw = arguments[3]; dh = arguments[4];
+      } else {
+        sx = 0; sy = 0; sw = iw; sh = ih;
+        dx = arguments[1]; dy = arguments[2]; dw = iw; dh = ih;
+      }
       if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
 
-      // Clamp the source rect to the actual image bounds (handles both a
-      // negative sx/sy and a crop that runs past the image's far edge —
-      // e.g. the last glyph cell packed against the right edge of an atlas).
+      const alpha = this.globalAlpha;
+      const W = this._canvas.width, H = this._canvas.height;
+      let compOp = 0;
+      if (this.globalCompositeOperation === "destination-in") compOp = 1;
+      else if (this.globalCompositeOperation === "multiply") compOp = 2;
+
+      __native__.blitPixels(
+        img._pixelData, iw, ih,
+        this._canvas._pixelData, W, H,
+        sx, sy, sw, sh,
+        Math.round(dx + t.e), Math.round(dy + t.f), dw, dh,
+        alpha, compOp
+      );
+      return;
+    }
+
+    // Non-identity path: rotation / skew — use JS _blit with transform matrix.
+    if (arguments.length >= 9) {
+      const sx = arguments[1] | 0, sy = arguments[2] | 0, sw = arguments[3] | 0, sh = arguments[4] | 0;
+      const dx = arguments[5], dy = arguments[6], dw = arguments[7], dh = arguments[8];
+      if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+
       const clippedSx = Math.max(0, sx);
       const clippedSy = Math.max(0, sy);
       const clippedEx = Math.min(iw, sx + sw);
@@ -1548,17 +1717,19 @@
       const ch = clippedEy - clippedSy;
       if (cw <= 0 || ch <= 0) return;
 
-      const cropped = new Uint8ClampedArray(cw * ch * 4);
+      const needed = cw * ch * 4;
+      if (!_cropBuf || _cropBufSize < needed) {
+        _cropBufSize = needed;
+        _cropBuf = new Uint8ClampedArray(_cropBufSize);
+      }
+      const cropped = _cropBuf;
+      const fullSrc = new Uint8ClampedArray(img._pixelData);
       for (let row = 0; row < ch; row++) {
         const srcOff = ((clippedSy + row) * iw + clippedSx) * 4;
         const dstOff = row * cw * 4;
         cropped.set(fullSrc.subarray(srcOff, srcOff + cw * 4), dstOff);
       }
 
-      // If the crop got clipped against an image edge, shrink/offset the
-      // dest rect proportionally instead of stretching the smaller cropped
-      // chunk to fill the originally-requested dest size — that stretch is
-      // what produces smeared/doubled-looking glyphs at atlas edges.
       const scaleX = dw / sw, scaleY = dh / sh;
       const outDx = dx + (clippedSx - sx) * scaleX;
       const outDy = dy + (clippedSy - sy) * scaleY;
@@ -1569,23 +1740,34 @@
       return;
     }
 
+    const fullSrc = new Uint8ClampedArray(img._pixelData);
     let dx, dy, dw, dh;
-    if (args.length >= 4) { dx = args[0]; dy = args[1]; dw = args[2]; dh = args[3]; }
-    else { dx = args[0]; dy = args[1]; dw = iw; dh = ih; }
+    if (arguments.length >= 5) { dx = arguments[1]; dy = arguments[2]; dw = arguments[3]; dh = arguments[4]; }
+    else { dx = arguments[1]; dy = arguments[2]; dw = iw; dh = ih; }
     this._blit(fullSrc, iw, ih, dx, dy, dw, dh);
+    } finally { _fp.drawImageTime += performance.now() - _dt0; }
   };
 
   Canvas2DContextShim.prototype.getImageData = function (x, y, w, h) {
     const data = this._pix(), W = this._canvas.width, H = this._canvas.height;
     const out = new Uint8ClampedArray(w * h * 4);
-    for (let yy = 0; yy < h; yy++) {
-      for (let xx = 0; xx < w; xx++) {
-        const sx = Math.floor(x) + xx, sy = Math.floor(y) + yy;
-        const di = (yy * w + xx) * 4;
-        if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
-          const si = (sy * W + sx) * 4;
-          out[di] = data[si]; out[di+1] = data[si+1]; out[di+2] = data[si+2]; out[di+3] = data[si+3];
-        }
+    x = Math.floor(x); y = Math.floor(y);
+
+    if (x === 0 && y === 0 && w === W && h === H) {
+      out.set(data);
+      return { data: out, width: w, height: h };
+    }
+
+    const rowStart = Math.max(0, -x);
+    const rowEnd = Math.min(w, W - x);
+    if (rowEnd > rowStart) {
+      const rowLen = (rowEnd - rowStart) * 4;
+      for (let yy = 0; yy < h; yy++) {
+        const sy = y + yy;
+        if (sy < 0 || sy >= H) continue;
+        const si = (sy * W + (x + rowStart)) * 4;
+        const di = (yy * w + rowStart) * 4;
+        out.set(data.subarray(si, si + rowLen), di);
       }
     }
     return { data: out, width: w, height: h };
@@ -1593,12 +1775,23 @@
   Canvas2DContextShim.prototype.putImageData = function (img, x, y) {
     const data = this._pix(), W = this._canvas.width, H = this._canvas.height;
     const src = img.data;
-    for (let yy = 0; yy < img.height; yy++) {
-      for (let xx = 0; xx < img.width; xx++) {
-        const sx = Math.floor(x) + xx, sy = Math.floor(y) + yy;
-        if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
-        const di = (sy * W + sx) * 4, si = (yy * img.width + xx) * 4;
-        data[di] = src[si]; data[di+1] = src[si+1]; data[di+2] = src[si+2]; data[di+3] = src[si+3];
+    x = Math.floor(x); y = Math.floor(y);
+
+    if (x === 0 && y === 0 && img.width === W && img.height === H) {
+      data.set(src);
+      return;
+    }
+
+    const rowStart = Math.max(0, -x);
+    const rowEnd = Math.min(img.width, W - x);
+    if (rowEnd > rowStart) {
+      const rowLen = (rowEnd - rowStart) * 4;
+      for (let yy = 0; yy < img.height; yy++) {
+        const sy = y + yy;
+        if (sy < 0 || sy >= H) continue;
+        const si = (yy * img.width + rowStart) * 4;
+        const di = (sy * W + (x + rowStart)) * 4;
+        data.set(src.subarray(si, si + rowLen), di);
       }
     }
   };
@@ -1714,6 +1907,14 @@
   Canvas2DContextShim.prototype._fillPath = function () {
     const data = this._pix(), W = this._canvas.width, H = this._canvas.height;
     const alpha = this.globalAlpha;
+    const fs = this.fillStyle;
+    const isSolidFill = !fs || !fs.__gradient;
+    const c = this._colorAt(0, 0);
+    const solidAlpha = Math.round(c.a * alpha);
+    const useFastPath = isSolidFill && solidAlpha >= 255 && this.globalCompositeOperation === "source-over";
+    const solidColor32 = useFastPath ? ((255 << 24) | (c.b << 16) | (c.g << 8) | c.r) : 0;
+    const dst32 = useFastPath ? new Uint32Array(data.buffer, data.byteOffset, data.byteLength >> 2) : null;
+
     for (let p = 0; p < this._path.length; p++) {
       const poly = this._path[p];
       if (poly.length < 2) continue;
@@ -1731,13 +1932,18 @@
           }
         }
         xs.sort(function (p, q) { return p - q; });
-        const c = this._colorAt(0, 0);
         for (let i = 0; i + 1 < xs.length; i += 2) {
           const x0 = Math.max(0, Math.floor(xs[i]));
           const x1 = Math.min(W - 1, Math.ceil(xs[i + 1]));
-          for (let xx = x0; xx <= x1; xx++) {
-            this._blendPixel(data, xx, yy, Math.round(c.r), Math.round(c.g), Math.round(c.b),
-                             Math.round(c.a * alpha));
+          if (x0 >= x1) continue;
+          if (useFastPath) {
+            const rowStart = yy * W + x0;
+            dst32.fill(solidColor32, rowStart, rowStart + (x1 - x0));
+          } else {
+            for (let xx = x0; xx <= x1; xx++) {
+              this._blendPixel(data, xx, yy, Math.round(c.r), Math.round(c.g), Math.round(c.b),
+                               Math.round(c.a * alpha));
+            }
           }
         }
       }
@@ -1828,6 +2034,7 @@ CanvasElementShim.prototype.getContext = function (type) {
     this.height = 0;
     this._src = "";
     this.complete = false;
+    this._dirty = true; // Start dirty so first texImage2D always uploads
   }
   ImageShim.prototype = Object.create(EventTargetShim.prototype);
   Object.defineProperty(ImageShim.prototype, "src", {
@@ -1841,7 +2048,10 @@ CanvasElementShim.prototype.getContext = function (type) {
       // metadata is synchronously available; deferring a microtask produces
       // zero-size bitmaps at use time (text-atlas bakes cache garbage).
       // Only the `load` EVENT stays async, as onload-waiting code expects.
+      const _ds = performance.now();
       const info = native.decodeImage(safePath(value));
+      _fp.decodeImageTime += performance.now() - _ds;
+      _fp.decodeImageCount++;
       if (info) {
         self.width = info.width;
         self.height = info.height;
@@ -1942,12 +2152,16 @@ CanvasElementShim.prototype.getContext = function (type) {
     }
   });
   ElementShim.prototype.appendChild = function (child) {
+    const _ac0 = performance.now();
+    _fp.appendChildCount++;
+    try {
     this.children.push(child);
     child.parentNode = this;
     if (child && child.tagName === "SCRIPT" && child.src) {
       loadAndEvalScript(child);
     }
     return child;
+    } finally { _fp.appendChildTime += performance.now() - _ac0; }
   };
   ElementShim.prototype.removeChild = function (child) {
     const i = this.children.indexOf(child);
@@ -2092,9 +2306,13 @@ CanvasElementShim.prototype.getContext = function (type) {
   EventTargetShim.call(documentShim);
   Object.assign(documentShim, {
     createElement: function (tag) {
+      const _ce0 = performance.now();
+      _fp.createElementCount++;
+      try {
       const t = String(tag).toLowerCase();
       if (t === "canvas") return new CanvasElementShim(0, 0);
       return new ElementShim(t);
+      } finally { _fp.createElementTime += performance.now() - _ce0; }
     },
     body: new ElementShim("body"),
     head: new ElementShim("head"),
@@ -2221,6 +2439,7 @@ CanvasElementShim.prototype.getContext = function (type) {
     // those (e.g. FOSSIL sets xhr.onload at line 7696 but only defines
     // Fossil.onXhrLoad at line 7710). So always defer.
     const doLoad = function () {
+      _fp.readFileCount++;
       if (this._responseType === "arraybuffer" || this._responseType === "blob") {
         const data = native.readFileBinary ? native.readFileBinary(path) : native.readFile(path);
         if (data == null) {
@@ -2252,7 +2471,17 @@ CanvasElementShim.prototype.getContext = function (type) {
       }
     };
 
-    setTimeout(function () { doLoad.call(this); }.bind(this), 0);
+    // Execute synchronously — RMMZ's DataManager polls isDatabaseLoaded()
+    // every frame, and FOSSIL assigns its handler BEFORE send(). The old
+    // setTimeout(fn, 0) deferred every file load to the NEXT frame, causing
+    // cascading 1-frame delays during scene transitions with many concurrent
+    // XHR loads (database + map data + plugins).
+    const _xhrStart = performance.now();
+    doLoad.call(this);
+    const _xhrMs = performance.now() - _xhrStart;
+    if (_xhrMs > 10) {
+      print("[SLOW XHR " + _xhrMs.toFixed(1) + "ms] " + path);
+    }
   };
   globalThis.XMLHttpRequest = XMLHttpRequestShim;
 
@@ -3600,10 +3829,22 @@ CanvasElementShim.prototype.getContext = function (type) {
       const _cs = SceneManager.changeScene;
       SceneManager.changeScene = function () {
         const before = SceneManager._scene ? SceneManager._scene.constructor.name : "null";
+        const _t0 = performance.now();
         const r = _cs.apply(this, arguments);
+        const _ms = performance.now() - _t0;
         const after = SceneManager._scene ? SceneManager._scene.constructor.name : "null";
-        if (before !== after) print("[SC] changeScene: " + before + " -> " + after + " (next=" + (SceneManager._nextScene ? SceneManager._nextScene.constructor.name : "null") + ")");
+        if (before !== after) print("[SC] changeScene: " + before + " -> " + after + " (next=" + (SceneManager._nextScene ? SceneManager._nextScene.constructor.name : "null") + ") " + _ms.toFixed(1) + "ms");
+        else if (_ms > 5) print("[SC] changeScene (no-op) " + _ms.toFixed(1) + "ms");
         return r;
+      };
+      const _scUp = SceneManager.update;
+      SceneManager.update = function () {
+        const _t0 = performance.now();
+        try { return _scUp.apply(this, arguments); }
+        finally {
+          const _ms = performance.now() - _t0;
+          if (_ms > 5) print("[SC] SceneManager.update " + _ms.toFixed(1) + "ms");
+        }
       };
     }
 

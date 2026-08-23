@@ -1047,6 +1047,8 @@ static JSValue js_native_memory_usage(JSContext *ctx, JSValueConst this_val, int
     return obj;
 }
 
+static JSValue js_native_blit_pixels(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
+
 static void register_native_bridge(JSContext *ctx) {
     JSValue global = JS_GetGlobalObject(ctx);
 
@@ -1132,6 +1134,8 @@ static void register_native_bridge(JSContext *ctx) {
                        JS_NewCFunction(ctx, js_native_transform_point, "transformPoint", 3));
     JS_SetPropertyStr(ctx, native, "calculateBounds",
                        JS_NewCFunction(ctx, js_native_calculate_bounds, "calculateBounds", 5));
+    JS_SetPropertyStr(ctx, native, "blitPixels",
+                       JS_NewCFunction(ctx, js_native_blit_pixels, "blitPixels", 16));
 
     JSValue gl = JS_NewObject(ctx);
     register_gl_bridge(ctx, gl);
@@ -1139,6 +1143,238 @@ static void register_native_bridge(JSContext *ctx) {
 
     JS_SetPropertyStr(ctx, global, "__native__", native);
     JS_FreeValue(ctx, global);
+}
+
+// Software blit: copies pixels from a source ArrayBuffer to a destination
+// ArrayBuffer with optional nearest-neighbor scaling, alpha blending, and
+// composite operations.  Handles the hot path that was previously 389+
+// drawImage→_blit calls per frame through the JS shim layer.
+//
+// argv: srcAB, srcW, srcH, dstAB, dstW, dstH,
+//        sx, sy, sw, sh, dx, dy, dw, dh, alpha, compOp
+//   compOp: 0=source-over, 1=destination-in, 2=multiply
+static JSValue js_native_blit_pixels(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    (void)this_val;
+    if (argc < 16) return JS_UNDEFINED;
+
+    size_t src_len = 0, dst_len = 0;
+    uint8_t *src = JS_GetArrayBuffer(ctx, &src_len, argv[0]);
+    if (!src) {
+        // Handle TypedArray (Uint8ClampedArray etc) — extract its underlying buffer
+        size_t off = 0, bpe = 0;
+        JSValue ab = JS_GetTypedArrayBuffer(ctx, argv[0], &off, &src_len, &bpe);
+        if (!JS_IsException(ab)) {
+            size_t buf_sz = 0;
+            src = JS_GetArrayBuffer(ctx, &buf_sz, ab) + off;
+            JS_FreeValue(ctx, ab);
+        } else {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    }
+    int32_t srcW = 0, srcH = 0;
+    JS_ToInt32(ctx, &srcW, argv[1]);
+    JS_ToInt32(ctx, &srcH, argv[2]);
+
+    uint8_t *dst = JS_GetArrayBuffer(ctx, &dst_len, argv[3]);
+    if (!dst) {
+        size_t off = 0, bpe = 0;
+        JSValue ab = JS_GetTypedArrayBuffer(ctx, argv[3], &off, &dst_len, &bpe);
+        if (!JS_IsException(ab)) {
+            size_t buf_sz = 0;
+            dst = JS_GetArrayBuffer(ctx, &buf_sz, ab) + off;
+            JS_FreeValue(ctx, ab);
+        } else {
+            JS_FreeValue(ctx, JS_GetException(ctx));
+        }
+    }
+    int32_t dstW = 0, dstH = 0;
+    JS_ToInt32(ctx, &dstW, argv[4]);
+    JS_ToInt32(ctx, &dstH, argv[5]);
+
+    if (!src || !dst || srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return JS_UNDEFINED;
+
+    int32_t sx = 0, sy = 0, sw = 0, sh = 0;
+    int32_t dx = 0, dy = 0, dw = 0, dh = 0;
+    JS_ToInt32(ctx, &sx, argv[6]);
+    JS_ToInt32(ctx, &sy, argv[7]);
+    JS_ToInt32(ctx, &sw, argv[8]);
+    JS_ToInt32(ctx, &sh, argv[9]);
+    JS_ToInt32(ctx, &dx, argv[10]);
+    JS_ToInt32(ctx, &dy, argv[11]);
+    JS_ToInt32(ctx, &dw, argv[12]);
+    JS_ToInt32(ctx, &dh, argv[13]);
+
+    double alpha_d = 1.0;
+    JS_ToFloat64(ctx, &alpha_d, argv[14]);
+    int32_t compOp = 0;
+    JS_ToInt32(ctx, &compOp, argv[15]);
+
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return JS_UNDEFINED;
+
+    // Clip source rect to image bounds
+    int32_t csx = sx < 0 ? 0 : sx;
+    int32_t csy = sy < 0 ? 0 : sy;
+    int32_t csw = (sx + sw > srcW ? srcW : sx + sw) - csx;
+    int32_t csh = (sy + sh > srcH ? srcH : sy + sh) - csy;
+    if (csw <= 0 || csh <= 0) return JS_UNDEFINED;
+
+    // Adjust dest for clipping
+    double scaleX = (double)dw / (double)sw;
+    double scaleY = (double)dh / (double)sh;
+    int32_t adjDx = dx + (int32_t)((csx - sx) * scaleX);
+    int32_t adjDy = dy + (int32_t)((csy - sy) * scaleY);
+    int32_t adjDw = (int32_t)(csw * scaleX);
+    int32_t adjDh = (int32_t)(csh * scaleY);
+    if (adjDw <= 0 || adjDh <= 0) return JS_UNDEFINED;
+
+    // Clip dest rect to canvas bounds
+    int32_t dX0 = adjDx < 0 ? 0 : adjDx;
+    int32_t dY0 = adjDy < 0 ? 0 : adjDy;
+    int32_t dX1 = adjDx + adjDw > dstW ? dstW : adjDx + adjDw;
+    int32_t dY1 = adjDy + adjDh > dstH ? dstH : adjDy + adjDh;
+    if (dX0 >= dX1 || dY0 >= dY1) return JS_UNDEFINED;
+
+    int alpha_i = (int)(alpha_d * 255.0 + 0.5);
+    if (alpha_i < 0) alpha_i = 0;
+    if (alpha_i > 255) alpha_i = 255;
+    int opaque = (alpha_i >= 255);
+
+    // 1:1 copy — most common (glyphs, icons, full image blits).
+    // dest-in with opaque alpha: mask destination to source alpha only.
+    if (sw == dw && sh == dh) {
+        for (int32_t di = dY0; di < dY1; di++) {
+            int32_t si = di - adjDy + csy;
+            if (si < 0 || si >= srcH) continue;
+            for (int32_t dj = dX0; dj < dX1; dj++) {
+                int32_t sj = dj - adjDx + csx;
+                if (sj < 0 || sj >= srcW) continue;
+                int si4 = (si * srcW + sj) * 4;
+                int di4 = (di * dstW + dj) * 4;
+                uint8_t sR = src[si4], sG = src[si4+1], sB = src[si4+2], sA = src[si4+3];
+                int sa = (sA * alpha_i + 127) / 255;
+
+                if (compOp == 1) {
+                    // destination-in: dest = dest * src_alpha
+                    int dA = dst[di4+3];
+                    int oA = (sa * dA + 127) / 255;
+                    if (oA <= 0) {
+                        dst[di4] = dst[di4+1] = dst[di4+2] = dst[di4+3] = 0;
+                    } else {
+                        dst[di4]   = (uint8_t)((dst[di4]   * oA + dA/2) / dA);
+                        dst[di4+1] = (uint8_t)((dst[di4+1] * oA + dA/2) / dA);
+                        dst[di4+2] = (uint8_t)((dst[di4+2] * oA + dA/2) / dA);
+                        dst[di4+3] = (uint8_t)oA;
+                    }
+                    continue;
+                }
+
+                if (sa <= 0) continue;
+
+                if (opaque) {
+                    // Opaque source-over: simple overwrite
+                    if (compOp == 2) {
+                        // multiply: cO = cA*cB
+                        dst[di4]   = (uint8_t)((sR * dst[di4]   + 127) / 255);
+                        dst[di4+1] = (uint8_t)((sG * dst[di4+1] + 127) / 255);
+                        dst[di4+2] = (uint8_t)((sB * dst[di4+2] + 127) / 255);
+                        dst[di4+3] = 255;
+                    } else {
+                        dst[di4] = sR; dst[di4+1] = sG; dst[di4+2] = sB; dst[di4+3] = 255;
+                    }
+                } else {
+                    // Alpha source-over: standard Porter-Duff
+                    if (compOp == 2) {
+                        int dA = dst[di4+3];
+                        int oA = sa + dA - (sa * dA + 127) / 255;
+                        if (oA <= 0) { dst[di4] = dst[di4+1] = dst[di4+2] = dst[di4+3] = 0; continue; }
+                        int sR2 = (sR * dst[di4] + 127) / 255;
+                        int sG2 = (sG * dst[di4+1] + 127) / 255;
+                        int sB2 = (sB * dst[di4+2] + 127) / 255;
+                        int invS = 255 - sa;
+                        dst[di4]   = (uint8_t)((sR2 * sa + dst[di4]   * invS + 127) / 255);
+                        dst[di4+1] = (uint8_t)((sG2 * sa + dst[di4+1] * invS + 127) / 255);
+                        dst[di4+2] = (uint8_t)((sB2 * sa + dst[di4+2] * invS + 127) / 255);
+                        dst[di4+3] = (uint8_t)oA;
+                    } else {
+                        int dA = dst[di4+3];
+                        int invS = 255 - sa;
+                        int oA = sa + dA - (sa * dA + 127) / 255;
+                        if (oA <= 0) { dst[di4] = dst[di4+1] = dst[di4+2] = dst[di4+3] = 0; continue; }
+                        dst[di4]   = (uint8_t)((sR * sa + dst[di4]   * (dA * invS / 255) + 127) / oA);
+                        dst[di4+1] = (uint8_t)((sG * sa + dst[di4+1] * (dA * invS / 255) + 127) / oA);
+                        dst[di4+2] = (uint8_t)((sB * sa + dst[di4+2] * (dA * invS / 255) + 127) / oA);
+                        dst[di4+3] = (uint8_t)oA;
+                    }
+                }
+            }
+        }
+        return JS_UNDEFINED;
+    }
+
+    // Scaled nearest-neighbor blit
+    double invScaleX = (double)sw / (double)dw;
+    double invScaleY = (double)sh / (double)dh;
+
+    for (int32_t di = dY0; di < dY1; di++) {
+        int32_t si = csy + (int32_t)((di - adjDy) * invScaleY);
+        if (si < 0 || si >= srcH) continue;
+        int32_t sRow = si * srcW;
+        int32_t dRow = di * dstW;
+        for (int32_t dj = dX0; dj < dX1; dj++) {
+            int32_t sj = csx + (int32_t)((dj - adjDx) * invScaleX);
+            if (sj < 0 || sj >= srcW) continue;
+            int si4 = (sRow + sj) * 4;
+            int di4 = (dRow + dj) * 4;
+            uint8_t sR = src[si4], sG = src[si4+1], sB = src[si4+2], sA = src[si4+3];
+            int sa = (sA * alpha_i + 127) / 255;
+
+            if (compOp == 1) {
+                int dA = dst[di4+3];
+                int oA = (sa * dA + 127) / 255;
+                if (oA <= 0) {
+                    dst[di4] = dst[di4+1] = dst[di4+2] = dst[di4+3] = 0;
+                } else {
+                    dst[di4]   = (uint8_t)((dst[di4]   * oA + dA/2) / dA);
+                    dst[di4+1] = (uint8_t)((dst[di4+1] * oA + dA/2) / dA);
+                    dst[di4+2] = (uint8_t)((dst[di4+2] * oA + dA/2) / dA);
+                    dst[di4+3] = (uint8_t)oA;
+                }
+                continue;
+            }
+
+            if (sa <= 0) continue;
+
+            if (opaque) {
+                if (compOp == 2) {
+                    dst[di4]   = (uint8_t)((sR * dst[di4]   + 127) / 255);
+                    dst[di4+1] = (uint8_t)((sG * dst[di4+1] + 127) / 255);
+                    dst[di4+2] = (uint8_t)((sB * dst[di4+2] + 127) / 255);
+                    dst[di4+3] = 255;
+                } else {
+                    dst[di4] = sR; dst[di4+1] = sG; dst[di4+2] = sB; dst[di4+3] = 255;
+                }
+            } else {
+                int dA = dst[di4+3];
+                int invS = 255 - sa;
+                int oA = sa + dA - (sa * dA + 127) / 255;
+                if (oA <= 0) { dst[di4] = dst[di4+1] = dst[di4+2] = dst[di4+3] = 0; continue; }
+                if (compOp == 2) {
+                    int sR2 = (sR * dst[di4] + 127) / 255;
+                    int sG2 = (sG * dst[di4+1] + 127) / 255;
+                    int sB2 = (sB * dst[di4+2] + 127) / 255;
+                    dst[di4]   = (uint8_t)((sR2 * sa + dst[di4]   * invS + 127) / 255);
+                    dst[di4+1] = (uint8_t)((sG2 * sa + dst[di4+1] * invS + 127) / 255);
+                    dst[di4+2] = (uint8_t)((sB2 * sa + dst[di4+2] * invS + 127) / 255);
+                } else {
+                    dst[di4]   = (uint8_t)((sR * sa + dst[di4]   * (dA * invS / 255) + 127) / oA);
+                    dst[di4+1] = (uint8_t)((sG * sa + dst[di4+1] * (dA * invS / 255) + 127) / oA);
+                    dst[di4+2] = (uint8_t)((sB * sa + dst[di4+2] * (dA * invS / 255) + 127) / oA);
+                }
+                dst[di4+3] = (uint8_t)oA;
+            }
+        }
+    }
+    return JS_UNDEFINED;
 }
 
 static char *read_text_file(const char *path) {

@@ -25,6 +25,45 @@ typedef struct {
 static GLBridgeState g_gl_state = {GL_FALSE, GL_FALSE};
 
 // ------------------------------------------------------------------
+// Frame-level GL call counters (lightweight, always-on)
+// ------------------------------------------------------------------
+
+typedef struct {
+    int drawArrays;
+    int drawElements;
+    int drawArraysInstanced;
+    int drawElementsInstanced;
+    int texImage2D;
+    int texSubImage2D;
+    int texSkip;     // dirty-flag skip count
+    int bufferData;
+    int bufferSubData;
+} GLFrameCounters;
+
+static GLFrameCounters g_frame = {0};
+
+static JSValue js_resetCounters(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t; (void)argc; (void)argv;
+    g_frame = (GLFrameCounters){0};
+    return JS_UNDEFINED;
+}
+
+static JSValue js_getCounters(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
+    (void)t; (void)argc; (void)argv;
+    JSValue obj = JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, obj, "drawArrays", JS_NewInt32(ctx, g_frame.drawArrays));
+    JS_SetPropertyStr(ctx, obj, "drawElements", JS_NewInt32(ctx, g_frame.drawElements));
+    JS_SetPropertyStr(ctx, obj, "drawArraysInstanced", JS_NewInt32(ctx, g_frame.drawArraysInstanced));
+    JS_SetPropertyStr(ctx, obj, "drawElementsInstanced", JS_NewInt32(ctx, g_frame.drawElementsInstanced));
+    JS_SetPropertyStr(ctx, obj, "texImage2D", JS_NewInt32(ctx, g_frame.texImage2D));
+    JS_SetPropertyStr(ctx, obj, "texSubImage2D", JS_NewInt32(ctx, g_frame.texSubImage2D));
+    JS_SetPropertyStr(ctx, obj, "texSkip", JS_NewInt32(ctx, g_frame.texSkip));
+    JS_SetPropertyStr(ctx, obj, "bufferData", JS_NewInt32(ctx, g_frame.bufferData));
+    JS_SetPropertyStr(ctx, obj, "bufferSubData", JS_NewInt32(ctx, g_frame.bufferSubData));
+    return obj;
+}
+
+// ------------------------------------------------------------------
 // Argument helpers
 // ------------------------------------------------------------------
 
@@ -124,16 +163,23 @@ static GLint arg_location(JSContext *ctx, JSValueConst v) {
 static void flip_rows_in_place(uint8_t *data, int width, int height, int bytes_per_pixel) {
     if (!data || height <= 1) return;
     size_t row_bytes = (size_t)width * bytes_per_pixel;
-    uint8_t *tmp = malloc(row_bytes);
-    if (!tmp) return;
+    // Use a single-row buffer instead of malloc'ing the entire image.
+    // This avoids a potentially large allocation (e.g. 4MB for 1024x1024 RGBA).
+    uint8_t tmp[4096];
+    uint8_t *tmp_heap = NULL;
+    if (row_bytes > sizeof(tmp)) {
+        tmp_heap = malloc(row_bytes);
+        if (!tmp_heap) return;
+    }
+    uint8_t *buf = tmp_heap ? tmp_heap : tmp;
     for (int y = 0; y < height / 2; y++) {
         uint8_t *top = data + (size_t)y * row_bytes;
         uint8_t *bottom = data + (size_t)(height - 1 - y) * row_bytes;
-        memcpy(tmp, top, row_bytes);
+        memcpy(buf, top, row_bytes);
         memcpy(top, bottom, row_bytes);
-        memcpy(bottom, tmp, row_bytes);
+        memcpy(bottom, buf, row_bytes);
     }
-    free(tmp);
+    if (tmp_heap) free(tmp_heap);
 }
 
 static void premultiply_in_place(uint8_t *data, size_t byte_len) {
@@ -243,9 +289,9 @@ static JSValue js_bufferData(JSContext *ctx, JSValueConst t, int argc, JSValueCo
         glBufferData(target, (GLsizeiptr)len, data, usage);
     }
     TracyCZoneEnd(zone);
+    g_frame.bufferData++;
     return JS_UNDEFINED;
 }
-// Per-frame profiling for bufferSubData to identify call patterns
 static int g_frame_buffer_subdata_calls = 0;
 static size_t g_frame_buffer_subdata_bytes = 0;
 static int g_frame_array_buffer_calls = 0;
@@ -270,6 +316,7 @@ static JSValue js_bufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValu
     
     glBufferSubData(target, offset, (GLsizeiptr)len, data);
     TracyCZoneEnd(zone);
+    g_frame.bufferSubData++;
     return JS_UNDEFINED;
 }
 
@@ -337,10 +384,11 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
     GLint level = arg_int(ctx, argv[1]);
 
     if (argc <= 6 && argc > 0 && JS_IsObject(argv[argc - 1]) && is_image_like_source(ctx, argv[argc - 1])) {
+        JSValueConst source = argv[5];
+
         GLint internalformat = arg_int(ctx, argv[2]);
         GLenum format = arg_uint(ctx, argv[3]);
         GLenum type = arg_uint(ctx, argv[4]);
-        JSValueConst source = argv[5];
 
         GLint gl_internal = internalformat;
         if (gl_internal == GL_RGBA) gl_internal = GL_RGBA8;
@@ -363,6 +411,7 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
         glTexImage2D(target, level, gl_internal, w, h, 0, format, type, pixels);
         if (scratch) free(scratch);
         TracyCZoneEnd(zone);
+        g_frame.texImage2D++;
         return JS_UNDEFINED;
     }
 
@@ -392,6 +441,7 @@ static JSValue js_texImage2D(JSContext *ctx, JSValueConst t, int argc, JSValueCo
     glTexImage2D(target, level, gl_internal, width, height, border, format, type, pixels);
     if (scratch) free(scratch);
     TracyCZoneEnd(zone);
+    g_frame.texImage2D++;
     return JS_UNDEFINED;
 }
 
@@ -407,11 +457,12 @@ static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValu
     // Confirmed required: BaseImageResource.upload()'s texSubImage2D fast
     // path uses the 7-arg form for same-size texture updates.
     if (argc <= 7 && argc > 0 && JS_IsObject(argv[argc - 1]) && is_image_like_source(ctx, argv[argc - 1])) {
+        JSValueConst source = argv[6];
+
         GLint xoffset = arg_int(ctx, argv[2]);
         GLint yoffset = arg_int(ctx, argv[3]);
         GLenum format = arg_uint(ctx, argv[4]);
         GLenum type = arg_uint(ctx, argv[5]);
-        JSValueConst source = argv[6];
 
         int w = 0, h = 0;
         size_t len = 0;
@@ -430,6 +481,7 @@ static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValu
         glTexSubImage2D(target, level, xoffset, yoffset, w, h, format, type, pixels);
         if (scratch) free(scratch);
         TracyCZoneEnd(zone);
+        g_frame.texSubImage2D++;
         return JS_UNDEFINED;
     }
 
@@ -454,6 +506,7 @@ static JSValue js_texSubImage2D(JSContext *ctx, JSValueConst t, int argc, JSValu
     glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
     if (scratch) free(scratch);
     TracyCZoneEnd(zone);
+    g_frame.texSubImage2D++;
     return JS_UNDEFINED;
 }
 
@@ -705,6 +758,7 @@ static JSValue js_vertexAttribDivisor(JSContext *ctx, JSValueConst t, int argc, 
 }
 static JSValue js_drawArrays(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t; TracyCZoneN(zone, "gl.drawArrays", g_tracy_enabled); glDrawArrays(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2])); TracyCZoneEnd(zone);
+    g_frame.drawArrays++;
     return JS_UNDEFINED;
 }
 static JSValue js_drawElements(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
@@ -713,6 +767,7 @@ static JSValue js_drawElements(JSContext *ctx, JSValueConst t, int argc, JSValue
     glDrawElements(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                     (const void *)(intptr_t)arg_int(ctx, argv[3]));
     TracyCZoneEnd(zone);
+    g_frame.drawElements++;
     return JS_UNDEFINED;
 }
 static JSValue js_drawArraysInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
@@ -720,6 +775,7 @@ static JSValue js_drawArraysInstanced(JSContext *ctx, JSValueConst t, int argc, 
     TracyCZoneN(zone, "gl.drawArraysInstanced", g_tracy_enabled);
     glDrawArraysInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_int(ctx, argv[2]), arg_int(ctx, argv[3]));
     TracyCZoneEnd(zone);
+    g_frame.drawArraysInstanced++;
     return JS_UNDEFINED;
 }
 static JSValue js_drawElementsInstanced(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
@@ -728,6 +784,7 @@ static JSValue js_drawElementsInstanced(JSContext *ctx, JSValueConst t, int argc
     glDrawElementsInstanced(arg_uint(ctx, argv[0]), arg_int(ctx, argv[1]), arg_uint(ctx, argv[2]),
                              (const void *)(intptr_t)arg_int(ctx, argv[3]), arg_int(ctx, argv[4]));
     TracyCZoneEnd(zone);
+    g_frame.drawElementsInstanced++;
     return JS_UNDEFINED;
 }
 static JSValue js_drawBuffers(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
@@ -1140,4 +1197,5 @@ void register_gl_bridge(JSContext *ctx, JSValueConst gl_obj) {
     REG(gl_obj, useProgram); REG(gl_obj, vertexAttribDivisor); REG(gl_obj, vertexAttribPointer);
     REG(gl_obj, viewport);
     REG(gl_obj, getBufferSubDataStats); REG(gl_obj, resetBufferSubDataStats);
+    REG(gl_obj, resetCounters); REG(gl_obj, getCounters);
 }

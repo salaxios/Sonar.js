@@ -105,24 +105,30 @@ if(MINGW)
 endif()
 
 # ---------------------------------------------------------------------
-# Post-build: copy shims.js and Project1 next to the executable
+# Post-build: copy shims.js, audio_shims.js, and Project1 next to the executable
 # ---------------------------------------------------------------------
 # copy_if_different so we never touch the timestamp if unchanged.
 add_custom_command(TARGET rmmz_native POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_SOURCE_DIR}/src/shims.js
         $<TARGET_FILE_DIR:rmmz_native>/shims.js
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/audio_shims.js
+        $<TARGET_FILE_DIR:rmmz_native>/audio_shims.js
 )
 
-# shims.js is edited frequently (JS-only, so main.c never relinks). The
-# POST_BUILD copy above only runs when rmmz_native itself relinks, which
-# would silently ship a stale shims.js on every JS-only change. This ALL
-# target forces the copy on EVERY build regardless.
+# shims.js and audio_shims.js are edited frequently (JS-only, so main.c
+# never relinks). The POST_BUILD copy above only runs when rmmz_native
+# itself relinks, which would silently ship stale JS files on every
+# JS-only change. This ALL target forces the copy on EVERY build.
 add_custom_target(copy_shims ALL
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_SOURCE_DIR}/src/shims.js
         $<TARGET_FILE_DIR:rmmz_native>/shims.js
-    DEPENDS ${CMAKE_SOURCE_DIR}/src/shims.js
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/src/audio_shims.js
+        $<TARGET_FILE_DIR:rmmz_native>/audio_shims.js
+    DEPENDS ${CMAKE_SOURCE_DIR}/src/shims.js ${CMAKE_SOURCE_DIR}/src/audio_shims.js
 )
 
 # Bootstrap src/Project1 into the build tree ONLY if build/Project1 does not
