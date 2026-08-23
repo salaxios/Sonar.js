@@ -1246,7 +1246,10 @@ Scene_MenuBase.prototype.updateActor = function() {
 };
 
 Scene_MenuBase.prototype.createBackground = function() {
-    this._backgroundFilter = new PIXI.filters.BlurFilter();
+    if (!Scene_MenuBase._sharedBlurFilter) {
+        Scene_MenuBase._sharedBlurFilter = new PIXI.filters.BlurFilter();
+    }
+    this._backgroundFilter = Scene_MenuBase._sharedBlurFilter;
     this._backgroundSprite = new Sprite();
     this._backgroundSprite.bitmap = SceneManager.backgroundBitmap();
     this._backgroundSprite.filters = [this._backgroundFilter];

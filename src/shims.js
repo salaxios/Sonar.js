@@ -2,6 +2,68 @@
 (function () {
   "use strict";
 
+  // --- Legacy RegExp.$1-$9 static properties polyfill ---
+  // QuickJS does not implement the non-standard SpiderMonkey/V8 legacy
+  // RegExp.$1..$9 statics. VisuStella (and other MZ plugins) rely on
+  // these being set as a side effect of String.prototype.match().
+  //
+  // IMPORTANT: only String.prototype.match/matchAll are patched here.
+  // Do NOT also override RegExp.prototype.exec — doing so breaks
+  // QuickJS-ng's internal [Symbol.match] fast path and causes it to call
+  // exec with a `this` the native implementation rejects with
+  // "RegExp object expected". Every legacy-plugin use case we've seen
+  // (CoreEngine included) only ever calls .match(), never .exec()
+  // directly, so this is sufficient without touching exec.
+  (function () {
+    function setLegacyStatics(match) {
+      if (!match) return;
+      for (let i = 1; i <= 9; i++) {
+        RegExp["$" + i] = match[i] !== undefined ? match[i] : "";
+      }
+      RegExp.lastMatch = match[0] || "";
+      RegExp.lastParen = match[match.length - 1] || "";
+      RegExp.input = match.input || "";
+      RegExp.leftContext = match.input ? match.input.slice(0, match.index) : "";
+      RegExp.rightContext = match.input ? match.input.slice(match.index + match[0].length) : "";
+    }
+    const _origMatch = String.prototype.match;
+    String.prototype.match = function (regexp) {
+      // Spec: String.prototype.match wraps a non-RegExp argument in
+      // `new RegExp(regexp)` before matching (so .match(undefined) is
+      // legal and just matches an empty pattern). QuickJS-ng's native
+      // match/exec does NOT do this coercion and throws "RegExp object
+      // expected" instead. MZ/VisuStella plugins commonly build arrays of
+      // notetag regexes indexed by paramId and can end up passing an
+      // undefined slot straight into .match() — harmless in a browser,
+      // fatal here without this coercion.
+      let rx = regexp;
+      if (!(rx instanceof RegExp)) {
+        rx = new RegExp(rx === undefined || rx === null ? "" : rx);
+      }
+      const result = _origMatch.call(this, rx);
+      setLegacyStatics(result);
+      return result;
+    };
+    const _origMatchAll = String.prototype.matchAll;
+    if (_origMatchAll) {
+      String.prototype.matchAll = function (regexp) {
+        let rx = regexp;
+        if (!(rx instanceof RegExp)) {
+          rx = new RegExp(rx === undefined || rx === null ? "" : rx, "g");
+        }
+        const iter = _origMatchAll.call(this, rx);
+        return {
+          [Symbol.iterator]() { return this; },
+          next() {
+            const r = iter.next();
+            if (!r.done) setLegacyStatics(r.value);
+            return r;
+          },
+        };
+      };
+    }
+  })();
+
   // RMMZ percent-encodes asset URLs (Utils.encodeURI): spaces -> %20, $
   // -> %24, etc. Decode them back to real filesystem paths before loading.
   function safePath(url) {
@@ -3565,6 +3627,17 @@ CanvasElementShim.prototype.getContext = function (type) {
       }
     };
 
+    // Only wrap genuine plain plugin-parameter objects ({} / null-prototype
+    // structs). Arrays, RegExp, Date, Map, Function, and class instances
+    // must pass through untouched — wrapping them in a Proxy breaks native
+    // engine operations that require the real internal slots (e.g. a
+    // RegExp Proxy fails native .exec()/.match() with "RegExp object
+    // expected" even though `instanceof RegExp` still reports true).
+    function isPlainObject(value) {
+      const proto = Object.getPrototypeOf(value);
+      return proto === Object.prototype || proto === null;
+    }
+
     const visuMZHandler = {
       get: function (target, prop) {
         if (prop === "Settings") {
@@ -3580,7 +3653,7 @@ CanvasElementShim.prototype.getContext = function (type) {
         return target[prop];
       },
       set: function (target, prop, value) {
-        if (value && typeof value === "object" && !value._isProxiedVisuMZ) {
+        if (value && typeof value === "object" && !value._isProxiedVisuMZ && isPlainObject(value)) {
           value = new Proxy(value, visuMZHandler);
           value._isProxiedVisuMZ = true;
         }
@@ -3867,30 +3940,25 @@ CanvasElementShim.prototype.getContext = function (type) {
       delete globalThis.scriptUrls;
       globalThis.scriptUrls = undefined; // FOSSIL native-mode guard (no browser redirect)
 
-      // VisuStella's CoreEngine/MessageCore are distributed as obfuscated/minified
-      // blobs. Their bitmap-loading hooks iterate over undefined state during
-      // boot, throwing "cannot read property 'Symbol.iterator' of undefined"
-      // and aborting startup. The WebGLEmu runtime can't run obfuscated plugins,
-      // so these two are excluded from execution by default.
+      // VisuStella plugins are obfuscated/minified and may crash during boot
+      // due to missing browser APIs or undefined state. By default, ALL
+      // VisuMZ_ plugins are excluded from execution.
       //
-      // This is TOGGLEABLE at runtime for debugging: set the persisted flag
-      //   native.storageSet("enable_visustella", "1")
-      // and reload to execute them anyway (they will likely crash, but the
-      // stack trace is useful). Clear it with storageSet(key, "") to disable
-      // them again. Default = disabled.
+      // To enable ALL VisuStella plugins for testing/debugging, set env var:
+      //   set enable_visustella=1    (in run_game.bat or shell)
+      // They will likely crash, but the stack trace is useful.
+      // Unset the env var to disable them again.
       const _enableVisuStella =
-        String(native.storageGet("enable_visustella") || "").trim() === "1";
-      const _disabledPlugins = _enableVisuStella
-        ? {}
-        : { "VisuMZ_0_CoreEngine": true, "VisuMZ_1_MessageCore": true };
+        String((native.getEnv ? native.getEnv("enable_visustella") : null) || "").trim() === "1";
+      const _visuStellaExclude = !_enableVisuStella;
       if (_enableVisuStella) {
-        print("  [CONFIG] VisuStella execution ENABLED (debug mode)");
+        print("  [CONFIG] VisuStella execution ENABLED (all plugins will run)");
       } else {
-        print("  [CONFIG] VisuStella CoreEngine/MessageCore disabled (set enable_visustella=1 to debug)");
+        print("  [CONFIG] VisuStella plugins excluded (set enable_visustella=1 to enable all)");
       }
       for (const plugin of $plugins) {
         if (!plugin.status) continue;
-        if (_disabledPlugins[plugin.name]) { print("  [DISABLED (obfuscated)]: " + plugin.name); continue; }
+        if (_visuStellaExclude && plugin.name.startsWith("VisuMZ_")) { print("  [DISABLED (VisuStella)]: " + plugin.name); continue; }
         const url = "js/plugins/" + safePath(plugin.name) + ".js";
         const code = native.readFile(url);
         if (code) {
@@ -3940,6 +4008,21 @@ try {
       // initializes the array in its source code.
       if (typeof globalThis.Fossil !== "undefined") {
         globalThis.Fossil._errors = globalThis.Fossil._errors || [];
+      }
+
+      // VisuStella paramPlus diagnostic — log if paramPlus table has
+      // undefined/missing regex entries (the root cause of the
+      // "RegExp object expected" crashes we patched in the match wrapper).
+      if (typeof Game_BattlerBase !== "undefined" && typeof VisuMZ !== "undefined") {
+        const _origParamPlus = Game_BattlerBase.prototype.paramPlus;
+        Game_BattlerBase.prototype.paramPlus = function (paramId) {
+          const table = VisuMZ.CoreEngine && VisuMZ.CoreEngine.RegExp && VisuMZ.CoreEngine.RegExp.paramPlus;
+          if (!table || !(table[paramId] instanceof RegExp)) {
+            print("[DIAG] paramPlus bad entry: paramId=" + paramId + " tableLen=" + (table ? table.length : "no table"));
+          }
+          return _origParamPlus.call(this, paramId);
+        };
+        print("[DIAG] paramPlus diagnostic installed");
       }
 
       // ============================================================================

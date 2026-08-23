@@ -1272,12 +1272,18 @@ Bitmap.snap = function(stage) {
     const renderTexture = PIXI.RenderTexture.create(width, height);
     if (stage) {
         const renderer = Graphics.app.renderer;
+        const _snapT0 = performance.now();
         renderer.render(stage, renderTexture);
+        const _snapT1 = performance.now();
         stage.worldTransform.identity();
         const canvas = renderer.extract.canvas(renderTexture);
+        const _snapT2 = performance.now();
         bitmap.context.drawImage(canvas, 0, 0);
         canvas.width = 0;
         canvas.height = 0;
+        if ((_snapT2 - _snapT0) > 16) {
+            print("[snap] render=" + (_snapT1 - _snapT0).toFixed(1) + "ms extract=" + (_snapT2 - _snapT1).toFixed(1) + "ms total=" + (_snapT2 - _snapT0).toFixed(1) + "ms");
+        }
     }
     renderTexture.destroy({ destroyBase: true });
     bitmap.baseTexture.update();
