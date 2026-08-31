@@ -1,4 +1,33 @@
-                    GNU AFFERO GENERAL PUBLIC LICENSE
+1. CONSOLE & PROPRIETARY SDK EXCEPTION:
+   Permission is granted to link Sonar.js with proprietary console software 
+   development kits or platform SDKs (including but not limited to Xbox, 
+   PlayStation, and Nintendo Switch SDKs) and to distribute resulting binaries 
+   without triggering the requirement to distribute the source code of those 
+   proprietary SDKs or game-specific code. 
+   
+   This exception applies solely to versions of components strictly required to satisfy 
+   vendor NDA or proprietary platform requirements. Standard runtime builds 
+   for general-purpose desktop operating systems (Windows, macOS, Linux) that 
+   do not mandate an NDA for application publishing remain fully subject to 
+   the AGPLv3.
+
+2. APPLICATION & GAME CODE EXCEPTION:
+   Game code/scripts, and high-level plugins executing on top of 
+   Sonar.js are considered separate works and are not subject to the copyleft 
+   requirements of this License.
+
+3. POST-COMPILATION BINARY MODIFICATION EXCEPTION:
+   Permission is granted to perform post-compilation modifications, binary 
+   patching, icon/resource replacement, hex editing, or packing/unpacking on compiled 
+   Sonar.js binaries (such as embedding game assets or tweaking executable headers) 
+   without triggering source-release obligations for the modified binary itself. 
+   
+   This exception does NOT waive copyleft requirements for modifications made 
+   directly to the underlying C/C++ source code prior to compilation.
+
+----------------------------------------------------------------------------------
+
+                   GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
 
  Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
