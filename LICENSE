@@ -10,9 +10,9 @@ with the following Additional Permissions under Section 7:
    
    This exception applies solely to versions of components strictly required to satisfy 
    vendor NDA or proprietary platform requirements. Standard runtime builds 
-   for general-purpose desktop operating systems (Windows, macOS, Linux) that 
-   do not mandate an NDA for application publishing remain fully subject to 
-   the AGPLv3.
+   for general-purpose desktop operating systems (Windows, macOS, Linux) and 
+   standard mobile operating systems (iOS, Android) that do not mandate an NDA 
+   for application publishing remain fully subject to the AGPLv3.
 
 2. APPLICATION & GAME CODE EXCEPTION:
    Game code/scripts, and high-level plugins executing on top of 
