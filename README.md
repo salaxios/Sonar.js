@@ -1,16 +1,14 @@
 # Sonar.js <img width="48" height="48" alt="image" src="https://github.com/user-attachments/assets/c5cfd653-437a-44fc-9cee-8deff0dae503" />
 
-Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games via QuickJS.
-
+Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built on QuickJS + SDL3.
 Originally titled Salaxios WebGLEmu, Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io).
-
-Ultimate goal/direction to work toward is to create something like or similar to MXKP but for RPGMaker MZ (or for PixiJS HTML5 games in general).
-
+  
 Experimental changes:
 
 - Tracy profiler implemented to profile lag, so that we can optimize.
 - Highly improved but incomplete Support for Bitmap text rendering plugin (WIP)
 - Support for several of the base VisuStella plugins has been added
+
 
 Ultramode 7 proof of concept:
 <img width="1187" height="663" alt="image" src="https://github.com/user-attachments/assets/52dad355-3b80-4fc1-a87d-3182c29a1398" />
@@ -54,14 +52,3 @@ Check compile_instructions.txt for info on how to compile.
 
 IMPORTANT NOTE: All Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor until effekseer support can be worked on.
 
-The Sonar.js Philosophy
-If you make Sonar.js better, you should make it better for everyone.
-If you want to sell your game for the Nintendo Switch, go right ahead. These two are not in contradiction.
-
-What this license means for developers:
-
-Your Game Code is Yours: Write your game in JavaScript, pack your assets, build closed-source commercial titles, and sell them on Steam, the App Store, Google Play, or consoles. We lay no claim to your game code, scripts, or assets.
-
-Console Ready: Porting to Nintendo Switch, PlayStation, or Xbox? Our Section 7 exception explicitly permits linking to NDA-restricted console SDKs without forcing you to leak proprietary platform code or break vendor NDAs.
-
-Give Back to the Engine: If you patch, optimize, or upgrade the core C/C++ Sonar.js native runtime for desktop or mobile, those engine-level improvements belong to the community. Share your C/C++ source code fixes back so everyone benefits.
