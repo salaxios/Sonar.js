@@ -1,4 +1,4 @@
-Sonar.JS is licensed under the GNU General Public License v3.0 or later, 
+Sonar.JS is licensed under the GNU AFFERO General Public License v3.0 or later, 
 with the following Additional Permissions under Section 7:
 
 1. CONSOLE SDK EXCEPTION: Permission is granted to link Sonar.JS with proprietary 
@@ -10,8 +10,7 @@ with the following Additional Permissions under Section 7:
 2. APPLICATION/GAME SPECIFIC CODE EXCEPTION: JavaScript game scripts, and high-level 
    plugins executing on top of Sonar.JS are considered separate works and are 
    not subject to the copyleft requirements of this License.
-
-The GNU Affero General Public License as follows:
+----------------------------------------------------------------------------------
 
                    GNU AFFERO GENERAL PUBLIC LICENSE
                        Version 3, 19 November 2007
