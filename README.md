@@ -52,6 +52,16 @@ Bitmap Text & map title window rendering improved & different (NOTE THIS IMAGE I
 
 Check compile_instructions.txt for info on how to compile.
 
-
-
 IMPORTANT NOTE: All Battle animations that use Effekseer will not play and will cause the game to hang at this stage. Should be replaced with either MV style png animations inside the RPGMaker Editor until effekseer support can be worked on.
+
+The Sonar.js Philosophy
+If you make Sonar.js better, you should make it better for everyone.
+If you want to sell your game for the Nintendo Switch, go right ahead. These two are not in contradiction.
+
+What this license means for developers:
+
+Your Game Code is Yours: Write your game in JavaScript, pack your assets, build closed-source commercial titles, and sell them on Steam, the App Store, Google Play, or consoles. We lay no claim to your game code, scripts, or assets.
+
+Console Ready: Porting to Nintendo Switch, PlayStation, or Xbox? Our Section 7 exception explicitly permits linking to NDA-restricted console SDKs without forcing you to leak proprietary platform code or break vendor NDAs.
+
+Give Back to the Engine: If you patch, optimize, or upgrade the core C/C++ Sonar.js native runtime for desktop or mobile, those engine-level improvements belong to the community. Share your C/C++ source code fixes back so everyone benefits.
