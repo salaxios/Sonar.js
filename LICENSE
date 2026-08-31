@@ -16,6 +16,15 @@
    Sonar.js are considered separate works and are not subject to the copyleft 
    requirements of this License.
 
+3. POST-COMPILATION BINARY MODIFICATION EXCEPTION:
+   Permission is granted to perform post-compilation modifications, binary 
+   patching, icon/resource replacement, hex editing, or packing/unpacking on compiled 
+   Sonar.js binaries (such as embedding game assets or tweaking executable headers) 
+   without triggering source-release obligations for the modified binary itself. 
+   
+   This exception does NOT waive copyleft requirements for modifications made 
+   directly to the underlying C/C++ source code prior to compilation.
+
 ----------------------------------------------------------------------------------
 
                    GNU AFFERO GENERAL PUBLIC LICENSE
