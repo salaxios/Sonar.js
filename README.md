@@ -4,6 +4,22 @@
 # NOTE: MAIN BRANCH IS OLD. USE EXPERIMENTAL. https://github.com/salaxios/Sonar.js/tree/experimental
 Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io). Originally titled Salaxios WebGLEmu
 
+The Sonar.js philosophy:
+> **If you make Sonar.js better, you should make it better for everyone. If you want to sell your game for the Nintendo Switch, go right ahead. These two are not in contradiction.**
+
+---
+
+### What This License Means for Developers
+
+* **Your Game Code is Yours**  
+  Write your game in JavaScript, pack your assets, build closed-source commercial titles, and sell them on Steam, the App Store, Google Play, or consoles. We lay no claim to your game code, scripts, or assets.
+
+* **Console Ready**  
+  Porting to Nintendo Switch, PlayStation, or Xbox? Our Section 7 exception explicitly permits linking to NDA-restricted console SDKs without forcing you to leak proprietary platform code or break vendor NDAs.
+
+* **Give Back to the Engine**  
+  If you patch, optimize, or upgrade the core C/C++ Sonar.js native runtime for desktop or mobile, those engine-level improvements belong to the community. Share your C/C++ source code fixes back so everyone benefits.
+  
 Ultramode 7 proof of concept:
 <img width="1187" height="663" alt="image" src="https://github.com/user-attachments/assets/52dad355-3b80-4fc1-a87d-3182c29a1398" />
 
