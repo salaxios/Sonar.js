@@ -1,4 +1,7 @@
 # Sonar.js <img width="48" height="48" alt="image" src="https://github.com/user-attachments/assets/e111f7e3-323e-4b21-9220-2a43aba554fc" />
+
+
+# NOTE: MAIN BRANCH IS OLD. USE EXPERIMENTAL. https://github.com/salaxios/Sonar.js/tree/experimental
 Sonar.js : (Salaxios Open NAtive Runtime). A first of its kind, non-browser/DOM javascript desktop native runtime written in C, for PixiJS v5 WebGL applications with a focus on being a game wrapper for RPG Maker MZ games. Built as an accessory to the Salaxios Narrative Engine (More info at https://salaxios.github.io). Originally titled Salaxios WebGLEmu
 
 Ultramode 7 proof of concept:
@@ -25,12 +28,12 @@ Bonus: Screenshots from Salaxios' The Locust (which utilises LOTS of highly visu
 
 - Battle scenes will load however:
 
-- Effekseer particle effects are not intended to be implimented at this stage. Wasm is not regular WebGL/Javascript and cannot be implimented with QuickJS.
+- Effekseer particle effects not implimented yet.
 (MV style .png battle animations should still work)
 
-- Video playback not intended to be implimented at this stage.
-
-- Touch UI support not yet implimented, and not a focus at this stage.
+- Video playback not yet implimented.
+- 
+- Touch UI support not yet implimented.
 
 - Basic keyboard functions like Z/X, Up, Right, Left, Down, Shift, etc. work.
 
