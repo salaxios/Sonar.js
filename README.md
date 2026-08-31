@@ -16,7 +16,7 @@ Ultramode 7 proof of concept:
 
 Bonus: Screenshots from Salaxios' The Locust (which utilises LOTS of highly visual plugins, a majority of which ran).
 
-Bitmap Text & map title window rendering improved & different (NOTE THIS IMAGE IS OLD. BITMAP TEXT RENDERING IS MUCH IMPROVED, THE TEXT NO LONGER HAS THE GLITCHY WHITE BOXES BEHIND IT)
+Bitmap Text & map title window rendering improved & different (NOTE THIS IMAGE IS OLD. BITMAP TEXT RENDERING IS MUCH IMPROVED, THE TEXT NO LONGER HAS THE GLITCHY BOXES BEHIND IT)
 
 <img width="973" height="582" alt="image" src="https://github.com/user-attachments/assets/8abcdd84-c12b-4204-95d8-74e6ce3b4374" />
 
