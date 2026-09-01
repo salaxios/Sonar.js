@@ -31,9 +31,9 @@ Bitmap Text & map title window rendering improved & different (NOTE THIS IMAGE I
 
 - Character faces work !
  
-- Community plugin support is highly variable, many do not work yet. Some will load, others will break the game, many will not work as intended.(FOSSIL should theoretically work, VisuStella does not work yet, UltraMode7 Works).
+- Community plugin support is highly variable,The majority work, but some do not. Both FOSSIL and VisuStella Core work, though some of the higher level visustella plugins like visustella save currently crash.
 
-- Saving/Loading games do not work yet, but this is a trivial fix, just need to rig up translation layer for the file IO that RPGMaker MZ usually uses in NW.JS
+- Saving/Loading games do not work yet, but this is a trivial fix, just need to rig up translation layer for the Node file IO that RPGMaker MZ usually uses in NW.JS
 
 - Audio has been added! a few glitches when multiple sound effects are attempted to be played over each other.
 
