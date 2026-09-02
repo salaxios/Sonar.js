@@ -9,8 +9,8 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # ---------------------------------------------------------------------
 set(THIRD_PARTY_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
-# quickjs-ng
-add_subdirectory(${THIRD_PARTY_DIR}/quickjs-ng EXCLUDE_FROM_ALL)
+# Bellard QuickJS
+add_subdirectory(${THIRD_PARTY_DIR}/quickjs EXCLUDE_FROM_ALL)
 
 # MSVC < 19.28 has no <stdatomic.h>. quickjs supports disabling atomics
 # entirely via __STDC_NO_ATOMICS__; the runtime never uses Atomics.
@@ -76,7 +76,7 @@ if(NOT TARGET quickjs AND TARGET qjs)
     set(QJS_TARGET qjs)
 endif()
 if(NOT TARGET ${QJS_TARGET})
-    message(FATAL_ERROR "Cannot find the quickjs-ng library target (expected `quickjs` or `qjs`).")
+    message(FATAL_ERROR "Cannot find the quickjs library target (expected `quickjs` or `qjs`).")
 endif()
 
 target_link_libraries(rmmz_native PRIVATE

@@ -1447,7 +1447,7 @@ static int eval_file(JSContext *ctx, const char *path) {
 // AudioContext, font loading), so this needs a general handler, not just
 // a fix for this one call site.
 static void promise_rejection_tracker(JSContext *ctx, JSValueConst promise,
-                                       JSValueConst reason, bool is_handled,
+                                       JSValueConst reason, int is_handled,
                                        void *opaque) {
     (void)promise; (void)opaque;
     if (is_handled) return; // fires again when a .catch() attaches later — ignore those

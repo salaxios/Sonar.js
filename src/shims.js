@@ -3614,8 +3614,27 @@ CanvasElementShim.prototype.getContext = function (type) {
     // --- VisuMZ Robust Settings Proxy ---
     // Prevents "cannot read property X of undefined" when plugin parameters
     // are missing or when plugins access nested settings that weren't initialized.
+    //
+    // IMPORTANT: never auto-vivify symbol properties or well-known
+    // coercion/inspection hooks (toString, valueOf, Symbol.toPrimitive,
+    // etc). If we hand back a fresh Proxy({}) for `.toString`, any later
+    // `"..." + someVisuMZPath` tries to *call* that Proxy as a function
+    // (since ToPrimitive looks up and invokes Symbol.toPrimitive/valueOf/
+    // toString) and throws "TypeError: not a function" — which is exactly
+    // the crash seen during Game_Actor param calculation.
+    const VISUMZ_PROXY_SKIP_PROPS = new Set([
+      "toString", "valueOf", "toJSON", "then",
+      "constructor", "hasOwnProperty", "isPrototypeOf",
+      "propertyIsEnumerable", "toLocaleString"
+    ]);
+    function visuMZShouldPassThrough(prop) {
+      return typeof prop === "symbol" || VISUMZ_PROXY_SKIP_PROPS.has(prop);
+    }
     const visuMZSettingsHandler = {
       get: function (target, prop) {
+        if (visuMZShouldPassThrough(prop)) {
+          return Reflect.get(target, prop);
+        }
         if (!(prop in target)) {
           target[prop] = {};
         }
@@ -3640,6 +3659,9 @@ CanvasElementShim.prototype.getContext = function (type) {
 
     const visuMZHandler = {
       get: function (target, prop) {
+        if (visuMZShouldPassThrough(prop)) {
+          return Reflect.get(target, prop);
+        }
         if (prop === "Settings") {
           if (!target.Settings || !target.Settings._isProxiedSettings) {
             target.Settings = new Proxy(target.Settings || {}, visuMZSettingsHandler);

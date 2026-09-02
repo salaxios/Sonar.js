@@ -120,7 +120,7 @@ static uint8_t *arg_typed_array(JSContext *ctx, JSValueConst v, size_t *out_len)
     }
 
     // 3. Fallback for plain JS Array
-    if (JS_IsArray(v)) {
+    if (JS_IsArray(ctx, v)) {
         JSValue len_val = JS_GetPropertyStr(ctx, v, "length");
         int32_t arr_len = 0;
         JS_ToInt32(ctx, &arr_len, len_val);
@@ -1011,7 +1011,7 @@ static JSValue js_getExtension(JSContext *ctx, JSValueConst t, int argc, JSValue
 // switched buffers between deferred calls).
 static JSValue js_batchBufferSubData(JSContext *ctx, JSValueConst t, int argc, JSValueConst *argv) {
     (void)t;
-    if (argc < 1 || !JS_IsArray(argv[0])) return JS_UNDEFINED;
+    if (argc < 1 || !JS_IsArray(ctx, argv[0])) return JS_UNDEFINED;
     TracyCZoneN(zone, "gl.batchBufferSubData", g_tracy_enabled);
     JSValue len_val = JS_GetPropertyStr(ctx, argv[0], "length");
     int32_t n = 0;
