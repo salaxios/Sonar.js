@@ -44,6 +44,24 @@ typedef struct {
     SDL_Window *window;
     SDL_GLContext gl_ctx;
     int running;
+
+    /* Cached JS function references (avoid per-frame global lookups) */
+    JSValue fn_tick;           /* globalThis.__tick__ */
+    JSValue fn_dispatch_key;   /* globalThis.__dispatchKeyboardEvent__ */
+    JSValue fn_dispatch_mouse; /* globalThis.__dispatchMouseEvent__ */
+    JSValue fn_dispatch_wheel; /* globalThis.__dispatchWheelEvent__ */
+    JSValue fn_now;            /* globalThis.__native__.now */
+
+    /* Reusable JS result objects — rotating pool to avoid per-call alloc.
+       Pool size 4: callers in PixiJS read results immediately, so 4 slots
+       eliminates virtually all overlap while keeping memory fixed. */
+    JSValue pool_matrix[4];
+    JSValue pool_point[4];
+    JSValue pool_bounds[4];
+    int pool_idx;
+
+    /* Per-frame cached timestamp (set once in __tick__, used by performance.now) */
+    double frame_timestamp;
 } EngineState;
 
 static EngineState g_engine = {0};
@@ -669,7 +687,10 @@ static JSValue js_native_audio_engine_volume(JSContext *ctx, JSValueConst this_v
 static JSValue js_native_now(JSContext *ctx, JSValueConst this_val,
                               int argc, JSValueConst *argv) {
     (void)this_val; (void)argc; (void)argv;
-    return JS_NewFloat64(ctx, (double)SDL_GetTicks());
+    /* Return the per-frame cached timestamp instead of calling SDL_GetTicks()
+       and allocating a new Float64 every time. Set once per frame in the
+       main loop before __tick__ runs. */
+    return JS_NewFloat64(ctx, g_engine.frame_timestamp);
 }
 
 static JSValue js_print(JSContext *ctx, JSValueConst this_val,
@@ -748,84 +769,78 @@ static int scancode_to_keycode(SDL_Scancode sc) {
 }
 
 static void dispatch_keyboard_event(JSContext *ctx, const char *type, SDL_KeyboardEvent *e) {
+    (void)ctx;
     TracyCZoneN(zone, "dispatch.keyboard", 1);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchKeyboardEvent__");
-    if (JS_IsFunction(ctx, fn)) {
+    JSValue fn = g_engine.fn_dispatch_key;
+    if (JS_IsFunction(g_engine.ctx, fn)) {
         JSValue args[8];
-        args[0] = JS_NewString(ctx, type);
-        args[1] = JS_NewInt32(ctx, scancode_to_keycode(e->scancode));
-        args[2] = JS_NewString(ctx, SDL_GetKeyName(e->key));
-        args[3] = JS_NewBool(ctx, e->repeat);
-        args[4] = JS_NewBool(ctx, (e->mod & SDL_KMOD_CTRL) != 0);
-        args[5] = JS_NewBool(ctx, (e->mod & SDL_KMOD_SHIFT) != 0);
-        args[6] = JS_NewBool(ctx, (e->mod & SDL_KMOD_ALT) != 0);
-        args[7] = JS_NewBool(ctx, (e->mod & SDL_KMOD_GUI) != 0);
-        JSValue result = JS_Call(ctx, fn, global, 8, args);
+        args[0] = JS_NewString(g_engine.ctx, type);
+        args[1] = JS_NewInt32(g_engine.ctx, scancode_to_keycode(e->scancode));
+        args[2] = JS_NewString(g_engine.ctx, SDL_GetKeyName(e->key));
+        args[3] = JS_NewBool(g_engine.ctx, e->repeat);
+        args[4] = JS_NewBool(g_engine.ctx, (e->mod & SDL_KMOD_CTRL) != 0);
+        args[5] = JS_NewBool(g_engine.ctx, (e->mod & SDL_KMOD_SHIFT) != 0);
+        args[6] = JS_NewBool(g_engine.ctx, (e->mod & SDL_KMOD_ALT) != 0);
+        args[7] = JS_NewBool(g_engine.ctx, (e->mod & SDL_KMOD_GUI) != 0);
+        JSValue result = JS_Call(g_engine.ctx, fn, JS_UNDEFINED, 8, args);
         if (JS_IsException(result)) {
-            JSValue exc = JS_GetException(ctx);
-            const char *msg = JS_ToCString(ctx, exc);
+            JSValue exc = JS_GetException(g_engine.ctx);
+            const char *msg = JS_ToCString(g_engine.ctx, exc);
             fprintf(stderr, "Keyboard event error: %s\n", msg ? msg : "(unknown)");
-            JS_FreeCString(ctx, msg);
-            JS_FreeValue(ctx, exc);
+            JS_FreeCString(g_engine.ctx, msg);
+            JS_FreeValue(g_engine.ctx, exc);
         }
-        JS_FreeValue(ctx, result);
-        for (int i = 0; i < 8; i++) JS_FreeValue(ctx, args[i]);
+        JS_FreeValue(g_engine.ctx, result);
+        for (int i = 0; i < 8; i++) JS_FreeValue(g_engine.ctx, args[i]);
     }
-    JS_FreeValue(ctx, fn);
-    JS_FreeValue(ctx, global);
     TracyCZoneEnd(zone);
 }
 
 static void dispatch_mouse_event(JSContext *ctx, const char *type, float x, float y, int button, int buttons) {
+    (void)ctx;
     TracyCZoneN(zone, "dispatch.mouse", 1);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchMouseEvent__");
-    if (JS_IsFunction(ctx, fn)) {
+    JSValue fn = g_engine.fn_dispatch_mouse;
+    if (JS_IsFunction(g_engine.ctx, fn)) {
         JSValue args[5];
-        args[0] = JS_NewString(ctx, type);
-        args[1] = JS_NewFloat64(ctx, (double)x);
-        args[2] = JS_NewFloat64(ctx, (double)y);
-        args[3] = JS_NewInt32(ctx, button);
-        args[4] = JS_NewInt32(ctx, buttons);
-        JSValue result = JS_Call(ctx, fn, global, 5, args);
+        args[0] = JS_NewString(g_engine.ctx, type);
+        args[1] = JS_NewFloat64(g_engine.ctx, (double)x);
+        args[2] = JS_NewFloat64(g_engine.ctx, (double)y);
+        args[3] = JS_NewInt32(g_engine.ctx, button);
+        args[4] = JS_NewInt32(g_engine.ctx, buttons);
+        JSValue result = JS_Call(g_engine.ctx, fn, JS_UNDEFINED, 5, args);
         if (JS_IsException(result)) {
-            JSValue exc = JS_GetException(ctx);
-            const char *msg = JS_ToCString(ctx, exc);
+            JSValue exc = JS_GetException(g_engine.ctx);
+            const char *msg = JS_ToCString(g_engine.ctx, exc);
             fprintf(stderr, "Mouse event error: %s\n", msg ? msg : "(unknown)");
-            JS_FreeCString(ctx, msg);
-            JS_FreeValue(ctx, exc);
+            JS_FreeCString(g_engine.ctx, msg);
+            JS_FreeValue(g_engine.ctx, exc);
         }
-        JS_FreeValue(ctx, result);
-        for (int i = 0; i < 5; i++) JS_FreeValue(ctx, args[i]);
+        JS_FreeValue(g_engine.ctx, result);
+        for (int i = 0; i < 5; i++) JS_FreeValue(g_engine.ctx, args[i]);
     }
-    JS_FreeValue(ctx, fn);
-    JS_FreeValue(ctx, global);
     TracyCZoneEnd(zone);
 }
 
 static void dispatch_wheel_event(JSContext *ctx, float dx, float dy) {
+    (void)ctx;
     TracyCZoneN(zone, "dispatch.wheel", 1);
-    JSValue global = JS_GetGlobalObject(ctx);
-    JSValue fn = JS_GetPropertyStr(ctx, global, "__dispatchWheelEvent__");
-    if (JS_IsFunction(ctx, fn)) {
+    JSValue fn = g_engine.fn_dispatch_wheel;
+    if (JS_IsFunction(g_engine.ctx, fn)) {
         JSValue args[2];
-        args[0] = JS_NewFloat64(ctx, (double)dx);
-        args[1] = JS_NewFloat64(ctx, (double)dy);
-        JSValue result = JS_Call(ctx, fn, global, 2, args);
+        args[0] = JS_NewFloat64(g_engine.ctx, (double)dx);
+        args[1] = JS_NewFloat64(g_engine.ctx, (double)dy);
+        JSValue result = JS_Call(g_engine.ctx, fn, JS_UNDEFINED, 2, args);
         if (JS_IsException(result)) {
-            JSValue exc = JS_GetException(ctx);
-            const char *msg = JS_ToCString(ctx, exc);
+            JSValue exc = JS_GetException(g_engine.ctx);
+            const char *msg = JS_ToCString(g_engine.ctx, exc);
             fprintf(stderr, "Wheel event error: %s\n", msg ? msg : "(unknown)");
-            JS_FreeCString(ctx, msg);
-            JS_FreeValue(ctx, exc);
+            JS_FreeCString(g_engine.ctx, msg);
+            JS_FreeValue(g_engine.ctx, exc);
         }
-        JS_FreeValue(ctx, result);
-        JS_FreeValue(ctx, args[0]);
-        JS_FreeValue(ctx, args[1]);
+        JS_FreeValue(g_engine.ctx, result);
+        JS_FreeValue(g_engine.ctx, args[0]);
+        JS_FreeValue(g_engine.ctx, args[1]);
     }
-    JS_FreeValue(ctx, fn);
-    JS_FreeValue(ctx, global);
     TracyCZoneEnd(zone);
 }
 
@@ -950,7 +965,8 @@ static void write_matrix3(JSContext *ctx, JSValue obj, const Matrix3 *m) {
     JS_SetPropertyStr(ctx, obj, "ty", JS_NewFloat64(ctx, m->ty));
 }
 
-// native.matrixMultiply(a, b) -> new matrix object (a * b)
+// native.matrixMultiply(a, b) -> matrix object (a * b)
+// Uses rotating pool to avoid per-call GC pressure.
 static JSValue js_native_matrix_multiply(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
     (void)this_val;
@@ -959,8 +975,9 @@ static JSValue js_native_matrix_multiply(JSContext *ctx, JSValueConst this_val,
     if (!read_matrix3(ctx, argv[0], &a) || !read_matrix3(ctx, argv[1], &b))
         return JS_UNDEFINED;
     matrix3_multiply(&out, &a, &b);
-    JSValue obj = JS_NewObject(ctx);
+    JSValue obj = g_engine.pool_matrix[g_engine.pool_idx & 3];
     write_matrix3(ctx, obj, &out);
+    JS_DupValue(ctx, obj);
     return obj;
 }
 
@@ -979,6 +996,7 @@ static JSValue js_native_matrix_append(JSContext *ctx, JSValueConst this_val,
 }
 
 // native.transformPoint(m, x, y) -> {x, y}
+// Uses rotating pool to avoid per-call GC pressure.
 static JSValue js_native_transform_point(JSContext *ctx, JSValueConst this_val,
                                           int argc, JSValueConst *argv) {
     (void)this_val;
@@ -990,13 +1008,17 @@ static JSValue js_native_transform_point(JSContext *ctx, JSValueConst this_val,
     JS_ToFloat64(ctx, &y, argv[2]);
     float fx = (float)x, fy = (float)y;
     matrix3_transform_point(&m, &fx, &fy);
-    JSValue obj = JS_NewObject(ctx);
+    int slot = g_engine.pool_idx & 3;
+    JSValue obj = g_engine.pool_point[slot];
     JS_SetPropertyStr(ctx, obj, "x", JS_NewFloat64(ctx, fx));
     JS_SetPropertyStr(ctx, obj, "y", JS_NewFloat64(ctx, fy));
+    g_engine.pool_idx++;
+    JS_DupValue(ctx, obj);
     return obj;
 }
 
 // native.calculateBounds(m, x, y, w, h) -> {minX, minY, maxX, maxY}
+// Uses rotating pool to avoid per-call GC pressure.
 static JSValue js_native_calculate_bounds(JSContext *ctx, JSValueConst this_val,
                                            int argc, JSValueConst *argv) {
     (void)this_val;
@@ -1011,11 +1033,14 @@ static JSValue js_native_calculate_bounds(JSContext *ctx, JSValueConst this_val,
     float mnx = 0, mny = 0, mxx = 0, mxy = 0;
     matrix3_calculate_bounds(&m, (float)x, (float)y, (float)w, (float)h,
                              &mnx, &mny, &mxx, &mxy);
-    JSValue obj = JS_NewObject(ctx);
+    int slot = g_engine.pool_idx & 3;
+    JSValue obj = g_engine.pool_bounds[slot];
     JS_SetPropertyStr(ctx, obj, "minX", JS_NewFloat64(ctx, mnx));
     JS_SetPropertyStr(ctx, obj, "minY", JS_NewFloat64(ctx, mny));
     JS_SetPropertyStr(ctx, obj, "maxX", JS_NewFloat64(ctx, mxx));
     JS_SetPropertyStr(ctx, obj, "maxY", JS_NewFloat64(ctx, mxy));
+    g_engine.pool_idx++;
+    JS_DupValue(ctx, obj);
     return obj;
 }
 
@@ -1649,6 +1674,35 @@ eval_file(g_engine.ctx, "js/main.js");
 		JS_FreeValue(g_engine.ctx, r);
 	}
 
+    /* Cache frequently-used JS function references to avoid per-frame lookups */
+    {
+        JSValue global = JS_GetGlobalObject(g_engine.ctx);
+        g_engine.fn_tick = JS_GetPropertyStr(g_engine.ctx, global, "__tick__");
+        g_engine.fn_dispatch_key = JS_GetPropertyStr(g_engine.ctx, global, "__dispatchKeyboardEvent__");
+        g_engine.fn_dispatch_mouse = JS_GetPropertyStr(g_engine.ctx, global, "__dispatchMouseEvent__");
+        g_engine.fn_dispatch_wheel = JS_GetPropertyStr(g_engine.ctx, global, "__dispatchWheelEvent__");
+
+        JSValue native = JS_GetPropertyStr(g_engine.ctx, global, "__native__");
+        if (!JS_IsUndefined(native) && !JS_IsNull(native)) {
+            g_engine.fn_now = JS_GetPropertyStr(g_engine.ctx, native, "now");
+        }
+        JS_FreeValue(g_engine.ctx, native);
+        JS_FreeValue(g_engine.ctx, global);
+
+        /* Pre-allocate rotating-pool result objects for matrix/transform/bounds.
+           These are overwritten every call and never GC'd. */
+        for (int i = 0; i < 4; i++) {
+            g_engine.pool_matrix[i] = JS_NewObject(g_engine.ctx);
+            g_engine.pool_point[i] = JS_NewObject(g_engine.ctx);
+            g_engine.pool_bounds[i] = JS_NewObject(g_engine.ctx);
+        }
+        g_engine.pool_idx = 0;
+        g_engine.frame_timestamp = 0.0;
+
+        fprintf(stderr, "Cached %d JS function refs + reusable pool objects\n",
+                !JS_IsUndefined(g_engine.fn_tick) ? 5 : 0);
+    }
+
 
     SDL_Event event;
     while (g_engine.running) {
@@ -1686,11 +1740,10 @@ eval_file(g_engine.ctx, "js/main.js");
             }
         }
 
-        JSValue global = JS_GetGlobalObject(g_engine.ctx);
-        JSValue tick_fn = JS_GetPropertyStr(g_engine.ctx, global, "__tick__");
-        JSValue ts = JS_NewFloat64(g_engine.ctx, (double)SDL_GetTicks());
+        g_engine.frame_timestamp = (double)SDL_GetTicks();
+        JSValue ts = JS_NewFloat64(g_engine.ctx, g_engine.frame_timestamp);
         TracyCZoneN(tick_zone, "JS tick", 1);
-        JSValue result = JS_Call(g_engine.ctx, tick_fn, global, 1, &ts);
+        JSValue result = JS_Call(g_engine.ctx, g_engine.fn_tick, JS_UNDEFINED, 1, &ts);
         TracyCZoneEnd(tick_zone);
         if (JS_IsException(result)) {
             JSValue exc = JS_GetException(g_engine.ctx);
@@ -1710,8 +1763,6 @@ eval_file(g_engine.ctx, "js/main.js");
         }
         JS_FreeValue(g_engine.ctx, result);
         JS_FreeValue(g_engine.ctx, ts);
-        JS_FreeValue(g_engine.ctx, tick_fn);
-        JS_FreeValue(g_engine.ctx, global);
 
         JSContext *pctx;
         while (JS_ExecutePendingJob(g_engine.rt, &pctx) > 0) {}
@@ -1719,6 +1770,18 @@ eval_file(g_engine.ctx, "js/main.js");
         SDL_GL_SwapWindow(g_engine.window);
         TracyCFrameMark;
         TracyCZoneEnd(frame_zone);
+    }
+
+    /* Free cached JS references and pool objects before destroying context */
+    JS_FreeValue(g_engine.ctx, g_engine.fn_tick);
+    JS_FreeValue(g_engine.ctx, g_engine.fn_dispatch_key);
+    JS_FreeValue(g_engine.ctx, g_engine.fn_dispatch_mouse);
+    JS_FreeValue(g_engine.ctx, g_engine.fn_dispatch_wheel);
+    JS_FreeValue(g_engine.ctx, g_engine.fn_now);
+    for (int i = 0; i < 4; i++) {
+        JS_FreeValue(g_engine.ctx, g_engine.pool_matrix[i]);
+        JS_FreeValue(g_engine.ctx, g_engine.pool_point[i]);
+        JS_FreeValue(g_engine.ctx, g_engine.pool_bounds[i]);
     }
 
     JS_FreeContext(g_engine.ctx);
